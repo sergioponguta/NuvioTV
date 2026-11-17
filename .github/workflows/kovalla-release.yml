@@ -1,0 +1,174 @@
+name: Kovalla release
+
+# Weekly check for a new stable upstream release, re-apply the Kovalla patches, build, sign and
+# publish the APKs the in-app updater downloads. A manual run with force=true rebuilds the current
+# upstream version under the next patch tag (for a corrected patch).
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even when upstream has no new stable tag"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: kovalla-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: NuvioMedia/NuvioTV
+  FORK_REPO: sergioponguta/NuvioTV
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the Kovalla branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve upstream and fork versions
+        id: versions
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          upstream=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name')
+          fork=$(gh api "repos/$FORK_REPO/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          echo "upstream=$upstream fork=${fork:-<none>} force=${FORCE:-false}"
+
+          # sort -V compares dotted numeric versions the same way semver does for these tags.
+          newer_than() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ] && [ "$1" != "$2" ]; }
+
+          if [ -z "$fork" ] || newer_than "$upstream" "$fork"; then
+            tag="$upstream"
+          elif [ "${FORCE:-false}" = "true" ]; then
+            base=$(printf '%s\n%s\n' "$upstream" "$fork" | sort -V | tail -n1)
+            tag=$(echo "$base" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
+          else
+            echo "Upstream has no new stable release and force is off; nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IFS=. read -r major minor patch <<< "$tag"
+          code=$(( 10#$major * 1000000 + 10#$minor * 10000 + 10#$patch * 100 ))
+
+          {
+            echo "build=true"
+            echo "tag=$tag"
+            echo "code=$code"
+            echo "upstream=$upstream"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing $tag (versionCode $code) from upstream $upstream"
+
+      - name: Checkout upstream at the stable tag
+        if: steps.versions.outputs.build == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.versions.outputs.upstream }}
+          path: src
+          fetch-depth: 1
+
+      - name: Apply Kovalla patches
+        id: patch
+        if: steps.versions.outputs.build == 'true'
+        working-directory: src
+        continue-on-error: true
+        run: |
+          git config user.name "kovalla-bot"
+          git config user.email "kovalla-bot@users.noreply.github.com"
+          git am --3way "$GITHUB_WORKSPACE"/.kovalla/patches/*.patch
+
+      - name: Report a patch failure
+        if: steps.patch.outcome == 'failure'
+        env:
+          UPSTREAM: ${{ steps.versions.outputs.upstream }}
+        run: |
+          title="Kovalla: los parches no aplican sobre upstream $UPSTREAM"
+          body=$(printf 'El workflow %s no pudo aplicar `.kovalla/patches` sobre `%s`.\n\nEjecución: %s/%s/actions/runs/%s\n\nSigue las instrucciones de `.kovalla/README.md` para regenerar los parches. La TV se queda con la versión que ya tiene.\n' "$GITHUB_WORKFLOW" "$UPSTREAM" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
+          existing=$(gh issue list --repo "$FORK_REPO" --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$FORK_REPO" --body "$body"
+          else
+            gh issue create --repo "$FORK_REPO" --title "$title" --body "$body"
+          fi
+          exit 1
+
+      - name: Set up Java 21
+        if: steps.versions.outputs.build == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up the Android SDK
+        if: steps.versions.outputs.build == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        if: steps.versions.outputs.build == 'true'
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0" > /dev/null
+
+      - name: Write build secrets
+        if: steps.versions.outputs.build == 'true'
+        env:
+          LOCAL_PROPERTIES_BASE64: ${{ secrets.LOCAL_PROPERTIES_BASE64 }}
+          KOVALLA_KEYSTORE_BASE64: ${{ secrets.KOVALLA_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$LOCAL_PROPERTIES_BASE64" | base64 -d > src/local.properties
+          printf '%s' "$KOVALLA_KEYSTORE_BASE64" | base64 -d > kovalla.jks
+          chmod 600 src/local.properties kovalla.jks
+
+      - name: Build the release APKs
+        if: steps.versions.outputs.build == 'true'
+        working-directory: src
+        env:
+          NUVIO_RELEASE_STORE_FILE: ${{ github.workspace }}/kovalla.jks
+          NUVIO_RELEASE_KEY_ALIAS: ${{ secrets.KOVALLA_KEY_ALIAS }}
+          NUVIO_RELEASE_KEY_PASSWORD: ${{ secrets.KOVALLA_KEY_PASSWORD }}
+          NUVIO_RELEASE_STORE_PASSWORD: ${{ secrets.KOVALLA_STORE_PASSWORD }}
+        run: |
+          ./gradlew :app:assembleFullRelease \
+            -PkovallaVersionName="${{ steps.versions.outputs.tag }}" \
+            -PkovallaVersionCode="${{ steps.versions.outputs.code }}" \
+            --no-daemon --console=plain
+
+      - name: Collect the APKs
+        if: steps.versions.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find src/app/build/outputs/apk/full/release -maxdepth 1 -name '*.apk' -exec cp {} release/ \;
+          ls -l release
+
+      - name: Publish the release
+        if: steps.versions.outputs.build == 'true'
+        env:
+          TAG: ${{ steps.versions.outputs.tag }}
+          UPSTREAM: ${{ steps.versions.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          notes=$(mktemp)
+          cat > "$notes" <<EOF
+          Nuvio Kovalla **$TAG** — parche sobre NuvioTV $UPSTREAM.
+
+          Instalación lado a lado con la app oficial (\`com.nuvio.tv.kovalla\`).
+          El actualizador interno descarga el APK de esta release según la ABI de la TV.
+          EOF
+          gh release create "$TAG" release/*.apk \
+            --repo "$FORK_REPO" \
+            --target "$GITHUB_SHA" \
+            --title "Nuvio Kovalla $TAG" \
+            --notes-file "$notes"

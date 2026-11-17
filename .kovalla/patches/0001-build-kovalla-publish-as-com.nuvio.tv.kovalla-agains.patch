@@ -1,0 +1,76 @@
+From e4968d64ee1b040c32738342a0f92a1cf3e1154d Mon Sep 17 00:00:00 2001
+From: Sergio Ponguta <sergioponguta@gmail.com>
+Date: Tue, 17 Nov 2026 11:23:41 -0500
+Subject: [PATCH 1/2] build(kovalla): publish as com.nuvio.tv.kovalla against
+ the fork's releases
+
+- Flavor `full` gets the `.kovalla` applicationId suffix so it installs side by side;
+  providers and the updater derive their authorities from applicationId.
+- Visible label is now "Nuvio Kovalla".
+- In-app updater points at sergioponguta/NuvioTV (GITHUB_OWNER).
+- versionName/versionCode can be stamped per release with -PkovallaVersionName/-PkovallaVersionCode,
+  which keeps the updater's semver comparison working for rebuilds of the same upstream tag.
+---
+ app/build.gradle.kts                | 16 ++++++++++++----
+ app/src/main/res/values/strings.xml |  2 +-
+ 2 files changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 3e774fa..4896188 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -101,6 +101,11 @@ val sentryProject = providers.environmentVariable("SENTRY_PROJECT").orNull?.trim
+     ?: resolveProperty(devProperties, localProperties, "SENTRY_PROJECT").takeIf { it.isNotBlank() }
+ val sentryMappingUploadEnabled = sentryAuthToken != null && sentryOrg != null && sentryProject != null
+ 
++// Kovalla fork: the release workflow stamps the fork release tag and a matching, monotonically
++// increasing versionCode so the in-app updater sees each rebuild (same upstream version) as newer.
++val kovallaVersionName = providers.gradleProperty("kovallaVersionName").orNull?.trim()?.takeIf { it.isNotBlank() }
++val kovallaVersionCode = providers.gradleProperty("kovallaVersionCode").orNull?.trim()?.toIntOrNull()
++
+ fun env(name: String): String? = providers.environmentVariable(name).orNull
+ 
+ fun truthy(value: String?): Boolean {
+@@ -135,8 +140,8 @@ android {
+         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+         minSdk = 24
+         targetSdk = 36
+-        versionCode = 1077
+-        versionName = "1.1.0"
++        versionCode = kovallaVersionCode ?: 1077
++        versionName = kovallaVersionName ?: "1.1.0"
+ 
+         buildConfigField("String", "PARENTAL_GUIDE_API_URL", "\"${localProperties.getProperty("PARENTAL_GUIDE_API_URL", "")}\"")
+         buildConfigField("String", "INTRODB_API_URL", "\"${localProperties.getProperty("INTRODB_API_URL", "")}\"")
+@@ -176,8 +181,8 @@ android {
+         buildConfigField("String", "SPONSOR_NAMES", buildConfigString(sponsorNames))
+         buildConfigField("String", "SENTRY_DSN", buildConfigString(sentryDsn))
+ 
+-        // In-app updater (GitHub Releases)
+-        buildConfigField("String", "GITHUB_OWNER", "\"NuvioMedia\"")
++        // In-app updater (GitHub Releases) — Kovalla fork
++        buildConfigField("String", "GITHUB_OWNER", "\"sergioponguta\"")
+         buildConfigField("String", "GITHUB_REPO", "\"NuvioTV\"")
+     }
+ 
+@@ -185,6 +190,9 @@ android {
+     productFlavors {
+         create("full") {
+             dimension = "distribution"
++            // Kovalla installs side by side with the official app. Providers and the updater build
++            // their authorities from applicationId, so they follow this suffix automatically.
++            applicationIdSuffix = ".kovalla"
+             buildConfigField("boolean", "FEATURE_PLUGINS_ENABLED", "true")
+             buildConfigField("boolean", "FEATURE_IN_APP_UPDATES_ENABLED", "true")
+             buildConfigField("boolean", "FEATURE_IN_APP_TRAILERS_ENABLED", "true")
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index cc39cbc..c25ed31 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1,5 +1,5 @@
+ <resources>
+-    <string name="app_name">Nuvio</string>
++    <string name="app_name">Nuvio Kovalla</string>
+     <string name="tv_channel_continue_watching">Continue Watching</string>
+     <string name="type_movie">Movie</string>
+     <string name="type_movies">Movies</string>

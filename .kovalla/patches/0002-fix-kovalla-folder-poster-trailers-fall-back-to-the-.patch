@@ -1,0 +1,115 @@
+From ac2c720032c891b1577500eed711587441374a31 Mon Sep 17 00:00:00 2001
+From: Sergio Ponguta <sergioponguta@gmail.com>
+Date: Tue, 17 Nov 2026 11:23:46 -0500
+Subject: [PATCH 2/2] fix(kovalla): folder poster trailers fall back to the
+ meta addons
+
+- Collection folders build items from TMDB with `tmdb:<id>`; the trailer pipeline only
+  consulted TMDB, which is off in this profile, and the screen never passes a YT fallback,
+  so hovering a poster played nothing.
+- When both come back empty, translate the id to IMDb (the only shape addons answer to) and
+  ask the meta addons for a trailer, then resolve it through the existing YouTube path.
+- Keeps the debounce, request-version guard, single in-flight job and negative cache intact;
+  cancellation is rethrown rather than swallowed so a stale request cannot cache a miss.
+---
+ .../collection/FolderDetailViewModel.kt       | 66 ++++++++++++++++++-
+ 1 file changed, 63 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt b/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt
+index 2597da1..819943f 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt
+@@ -45,6 +45,7 @@ import com.nuvio.tv.domain.repository.CatalogRepository
+ import com.nuvio.tv.core.poster.withCustomPosterUrls
+ import dagger.hilt.android.lifecycle.HiltViewModel
+ import dagger.hilt.android.qualifiers.ApplicationContext
++import kotlinx.coroutines.CancellationException
+ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.async
+ import kotlinx.coroutines.awaitAll
+@@ -1484,7 +1485,16 @@ class FolderDetailViewModel @Inject constructor(
+                     trailerSource
+                 }
+ 
+-                if (resolvedSource?.videoUrl.isNullOrBlank()) {
++                // Folder items are TMDB collection entries (`tmdb:<id>`), so they never reach the
++                // meta addons that can supply a trailer. When TMDB and the caller's fallback both
++                // come back empty, ask the addons through an IMDb id — the only id they answer to.
++                val finalSource = if (resolvedSource?.videoUrl.isNullOrBlank()) {
++                    resolveAddonTrailerSource(itemId, apiType, title, releaseInfo) ?: resolvedSource
++                } else {
++                    resolvedSource
++                }
++
++                if (finalSource?.videoUrl.isNullOrBlank()) {
+                     // While YouTube is rate limiting, a miss isn't remembered, so the
+                     // trailer comes back on a later focus once the pause is over.
+                     if (!trailerService.isRateLimited()) {
+@@ -1493,8 +1503,8 @@ class FolderDetailViewModel @Inject constructor(
+                     _trailerPreviewUrls.update { it - itemId }
+                     _trailerPreviewAudioUrls.update { it - itemId }
+                 } else {
+-                    _trailerPreviewUrls.update { it + (itemId to resolvedSource.videoUrl) }
+-                    val audioUrl = resolvedSource.audioUrl
++                    _trailerPreviewUrls.update { it + (itemId to finalSource.videoUrl) }
++                    val audioUrl = finalSource.audioUrl
+                     if (audioUrl.isNullOrBlank()) {
+                         _trailerPreviewAudioUrls.update { it - itemId }
+                     } else {
+@@ -1507,6 +1517,56 @@ class FolderDetailViewModel @Inject constructor(
+         }
+     }
+ 
++    /**
++     * Last-resort trailer source for folder posters. The meta addons (for example a trailer-only
++     * addon) answer to IMDb ids, while collection items carry `tmdb:<id>`, so translate first.
++     * Returns null when the id cannot be translated or no addon carries a trailer for it; the
++     * caller then records the miss in the negative cache.
++     */
++    private suspend fun resolveAddonTrailerSource(
++        itemId: String,
++        apiType: String,
++        title: String,
++        releaseInfo: String?
++    ): com.nuvio.tv.data.trailer.TrailerPlaybackSource? {
++        val baseId = itemId.substringBefore(':')
++        val imdbId = if (baseId.startsWith("tt")) {
++            baseId
++        } else {
++            val tmdbId = try {
++                tmdbService.ensureTmdbId(itemId, apiType)
++            } catch (e: CancellationException) {
++                throw e
++            } catch (_: Exception) {
++                null
++            }
++            tmdbId?.toIntOrNull()?.let { numericId ->
++                try {
++                    tmdbService.tmdbToImdb(numericId, apiType)
++                } catch (e: CancellationException) {
++                    throw e
++                } catch (_: Exception) {
++                    null
++                }
++            }
++        } ?: return null
++        val result = try {
++            metaRepository.getMetaFromAllAddons(apiType, imdbId)
++                .first { it is NetworkResult.Success || it is NetworkResult.Error }
++        } catch (e: CancellationException) {
++            throw e
++        } catch (_: Exception) {
++            null
++        }
++        val ytId = (result as? NetworkResult.Success)?.data?.trailerYtIds?.firstOrNull()
++            ?: return null
++        return trailerService.getTrailerPlaybackSourceFromYouTubeUrl(
++            youtubeUrl = "https://www.youtube.com/watch?v=$ytId",
++            title = title,
++            year = extractYear(releaseInfo)
++        )
++    }
++
+     private fun extractYear(releaseInfo: String?): String? {
+         if (releaseInfo.isNullOrBlank()) return null
+         return Regex("\\b(19|20)\\d{2}\\b").find(releaseInfo)?.value
