@@ -47,9 +47,12 @@ git clone --filter=blob:none https://github.com/NuvioMedia/NuvioTV.git /tmp/nuvi
 cd /tmp/nuvio-upstream
 git checkout <tag-nuevo>
 git am /ruta/al/fork/.kovalla/patches/*.patch    # si falla, resolver a mano
-# comprobar que compila:
-#   cp local.properties.example? -> usar local.properties con DOVI_NATIVE_ENABLED=false
+
+# local.properties: copiar local.example.properties y rellenar
+# NUVIO_SUPABASE_URL / NUVIO_SUPABASE_ANON_KEY / TMDB_API_KEY, con DOVI_NATIVE_ENABLED=false.
+# El keystore va por variables de entorno NUVIO_RELEASE_* (ver más abajo).
 ./gradlew :app:assembleFullRelease -PkovallaVersionName=<tag-nuevo> -PkovallaVersionCode=<code>
+
 # regenerar los parches:
 rm -rf /ruta/al/fork/.kovalla/patches/*
 git format-patch <tag-nuevo>..HEAD -o /ruta/al/fork/.kovalla/patches
