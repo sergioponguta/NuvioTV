@@ -1518,9 +1518,8 @@ class FolderDetailViewModel @Inject constructor(
     }
 
     /**
-     * Last-resort trailer source for folder posters. The meta addons (for example a trailer-only
-     * addon) answer to IMDb ids, while collection items carry `tmdb:<id>`, so translate first.
-     * Returns null when the id cannot be translated or no addon carries a trailer for it; the
+     * Last-resort trailer source for folder posters: a Spanish-language trailer from the meta
+     * addons (for example a trailer-only addon). Returns null when no addon carries one; the
      * caller then records the miss in the negative cache.
      */
     private suspend fun resolveAddonTrailerSource(
@@ -1529,37 +1528,12 @@ class FolderDetailViewModel @Inject constructor(
         title: String,
         releaseInfo: String?
     ): com.nuvio.tv.data.trailer.TrailerPlaybackSource? {
-        val baseId = itemId.substringBefore(':')
-        val imdbId = if (baseId.startsWith("tt")) {
-            baseId
-        } else {
-            val tmdbId = try {
-                tmdbService.ensureTmdbId(itemId, apiType)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                null
-            }
-            tmdbId?.toIntOrNull()?.let { numericId ->
-                try {
-                    tmdbService.tmdbToImdb(numericId, apiType)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    null
-                }
-            }
-        } ?: return null
-        val result = try {
-            metaRepository.getMetaFromAllAddons(apiType, imdbId)
-                .first { it is NetworkResult.Success || it is NetworkResult.Error }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
-        }
-        val ytId = (result as? NetworkResult.Success)?.data?.trailerYtIds?.firstOrNull()
-            ?: return null
+        val ytId = com.nuvio.tv.data.trailer.findLatinoTrailerYtId(
+            metaRepository = metaRepository,
+            tmdbService = tmdbService,
+            itemId = itemId,
+            apiType = apiType
+        ) ?: return null
         return trailerService.getTrailerPlaybackSourceFromYouTubeUrl(
             youtubeUrl = "https://www.youtube.com/watch?v=$ytId",
             title = title,

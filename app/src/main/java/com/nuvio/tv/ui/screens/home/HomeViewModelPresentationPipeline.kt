@@ -425,9 +425,6 @@ internal fun HomeViewModel.requestTrailerPreviewPipeline(
     if (startupGracePeriodActive) return
     if (ServerItemRef.isServerId(itemId)) return
 
-    // Resolve fallbackYtId from catalog item if not provided
-    val resolvedFallbackYtId = fallbackYtId ?: findCatalogItemById(itemId)?.trailerYtIds?.firstOrNull()
-
     // Always bump version — only the latest request (highest version) will proceed after debounce
     activeTrailerPreviewItemId = itemId
     trailerPreviewRequestVersion++
@@ -463,7 +460,14 @@ internal fun HomeViewModel.requestTrailerPreviewPipeline(
 
             withContext(Dispatchers.Main) {
                 if (trailerSource?.videoUrl.isNullOrBlank()) {
-                    val fallbackSource = resolvedFallbackYtId?.let { ytId ->
+                    // The catalog's own trailer (fallbackYtId) is usually the English one, so it is
+                    // ignored here: only a Spanish trailer from the meta addons is played.
+                    val fallbackSource = com.nuvio.tv.data.trailer.findLatinoTrailerYtId(
+                        metaRepository = metaRepository,
+                        tmdbService = tmdbService,
+                        itemId = itemId,
+                        apiType = apiType
+                    )?.let { ytId ->
                         trailerService.getTrailerPlaybackSourceFromYouTubeUrl(
                             youtubeUrl = "https://www.youtube.com/watch?v=$ytId",
                             title = title,
