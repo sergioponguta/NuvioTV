@@ -23,6 +23,11 @@ desde la rama por defecto.
    Se mantienen el debounce, el control de versión de petición, un solo lookup en vuelo y la
    caché negativa.
 
+4. **Hover solo en español latino**: en el inicio y en las carpetas el tráiler del hover se pide a los
+   addons de meta por id de IMDb y solo se acepta si trae `lang` `es-419` (o `es-XX` salvo `es-ES`).
+   Sin tráiler latino no se reproduce nada. Si la petición compartida responde «el meta del
+   catálogo basta» (sin tráilers), se reintenta hasta tres veces.
+
 ## Esquema de versiones (importante para el actualizador)
 
 El actualizador compara el **tag** de la release con `BuildConfig.VERSION_NAME` usando semver, y

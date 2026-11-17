@@ -1,0 +1,212 @@
+From 379213863091537bf6b6c1aedc2efa00da97c0b3 Mon Sep 17 00:00:00 2001
+From: Sergio Ponguta <sergioponguta@gmail.com>
+Date: Tue, 17 Nov 2026 14:59:06 -0500
+Subject: [PATCH] fix(kovalla): hover trailers only play Latin American Spanish
+ ones
+
+- Home and folder hover took the first trailer of any language: the English one from the
+  catalog or TMDB, or the Spain dub the stock metadata addons carry as lang es / es-ES.
+- New findLatinoTrailerYtId asks the meta addons by IMDb id and keeps only lang es-419
+  (or another es-XX except es-ES); titles without one play nothing.
+- A lookup shared with the screen's own source-sufficient request answered with a meta that has
+  no trailers, so folder hover missed silently; retry up to three times when that happens.
+---
+ .../tv/data/trailer/LatinoTrailerLookup.kt    | 94 +++++++++++++++++++
+ .../collection/FolderDetailViewModel.kt       | 42 ++-------
+ .../home/HomeViewModelPresentationPipeline.kt | 12 ++-
+ 3 files changed, 110 insertions(+), 38 deletions(-)
+ create mode 100644 app/src/main/java/com/nuvio/tv/data/trailer/LatinoTrailerLookup.kt
+
+diff --git a/app/src/main/java/com/nuvio/tv/data/trailer/LatinoTrailerLookup.kt b/app/src/main/java/com/nuvio/tv/data/trailer/LatinoTrailerLookup.kt
+new file mode 100644
+index 000000000..ba774d591
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/data/trailer/LatinoTrailerLookup.kt
+@@ -0,0 +1,94 @@
++package com.nuvio.tv.data.trailer
++
++import android.util.Log
++import com.nuvio.tv.core.network.NetworkResult
++import com.nuvio.tv.core.tmdb.TmdbService
++import com.nuvio.tv.domain.repository.MetaRepository
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.first
++
++private const val TAG = "LatinoTrailerLookup"
++private const val SOURCE_SUFFICIENT_RETRIES = 3
++private const val SOURCE_SUFFICIENT_RETRY_DELAY_MS = 500L
++
++private fun isLatinAmericanSpanish(lang: String?): Boolean {
++    val l = lang?.trim()?.lowercase() ?: return false
++    return l.startsWith("es-") && l != "es-es"
++}
++
++/**
++ * Asks the installed meta addons for a Latin American Spanish trailer (`lang` "es-419" or another
++ * regional "es-XX" except "es-ES", as the "Trailers ES Latino" addon reports it) and returns its
++ * YouTube id. A bare "es" or "es-ES" is the Spain dub that the stock metadata addons carry.
++ *
++ * Hover trailers used to take the first trailer of any language, which in practice was the
++ * English one from the catalog or from TMDB. Titles with no Spanish trailer return null, so
++ * nothing plays instead of an English video.
++ *
++ * Meta addons answer to IMDb ids only, so `tmdb:<n>` ids are translated first.
++ */
++suspend fun findLatinoTrailerYtId(
++    metaRepository: MetaRepository,
++    tmdbService: TmdbService,
++    itemId: String,
++    apiType: String
++): String? {
++    val baseId = itemId.substringBefore(':')
++    val imdbId = if (baseId.startsWith("tt")) {
++        baseId
++    } else {
++        val tmdbId = try {
++            tmdbService.ensureTmdbId(itemId, apiType)
++        } catch (e: CancellationException) {
++            throw e
++        } catch (_: Exception) {
++            null
++        }
++        tmdbId?.toIntOrNull()?.let { numericId ->
++            try {
++                tmdbService.tmdbToImdb(numericId, apiType)
++            } catch (e: CancellationException) {
++                throw e
++            } catch (_: Exception) {
++                null
++            }
++        }
++    } ?: run {
++        Log.d(TAG, "No IMDb id for $itemId; skipping")
++        return null
++    }
++
++    repeat(SOURCE_SUFFICIENT_RETRIES) { attempt ->
++        val result = try {
++            metaRepository.getMetaFromAllAddons(apiType, imdbId)
++                .first { it is NetworkResult.Success || it is NetworkResult.Error }
++        } catch (e: CancellationException) {
++            throw e
++        } catch (e: Exception) {
++            Log.w(TAG, "Meta lookup failed for $imdbId: ${e.message}")
++            return null
++        }
++        when {
++            result is NetworkResult.Success -> {
++                val ytId = result.data.trailers
++                    .firstOrNull { !it.ytId.isNullOrBlank() && isLatinAmericanSpanish(it.lang) }
++                    ?.ytId
++                Log.d(TAG, "$imdbId: ${if (ytId == null) "no Latin trailer" else "Latin trailer found"} (${result.data.trailers.size} trailers)")
++                return ytId
++            }
++            // A lookup that was already in flight for this id was started with the catalog's own
++            // addon as source and answered "the catalog meta is enough", which carries no trailers.
++            // That call has finished by now, so asking again does the real request.
++            result is NetworkResult.Error && result.code == NetworkResult.SOURCE_SUFFICIENT_CODE -> {
++                Log.d(TAG, "$imdbId: shared in-flight lookup was source-sufficient, retry ${attempt + 1}")
++                delay(SOURCE_SUFFICIENT_RETRY_DELAY_MS)
++            }
++            else -> {
++                Log.d(TAG, "$imdbId: no meta from addons")
++                return null
++            }
++        }
++    }
++    return null
++}
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt b/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt
+index 819943fde..4182c0a74 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt
+@@ -1518,9 +1518,8 @@ class FolderDetailViewModel @Inject constructor(
+     }
+ 
+     /**
+-     * Last-resort trailer source for folder posters. The meta addons (for example a trailer-only
+-     * addon) answer to IMDb ids, while collection items carry `tmdb:<id>`, so translate first.
+-     * Returns null when the id cannot be translated or no addon carries a trailer for it; the
++     * Last-resort trailer source for folder posters: a Spanish-language trailer from the meta
++     * addons (for example a trailer-only addon). Returns null when no addon carries one; the
+      * caller then records the miss in the negative cache.
+      */
+     private suspend fun resolveAddonTrailerSource(
+@@ -1529,37 +1528,12 @@ class FolderDetailViewModel @Inject constructor(
+         title: String,
+         releaseInfo: String?
+     ): com.nuvio.tv.data.trailer.TrailerPlaybackSource? {
+-        val baseId = itemId.substringBefore(':')
+-        val imdbId = if (baseId.startsWith("tt")) {
+-            baseId
+-        } else {
+-            val tmdbId = try {
+-                tmdbService.ensureTmdbId(itemId, apiType)
+-            } catch (e: CancellationException) {
+-                throw e
+-            } catch (_: Exception) {
+-                null
+-            }
+-            tmdbId?.toIntOrNull()?.let { numericId ->
+-                try {
+-                    tmdbService.tmdbToImdb(numericId, apiType)
+-                } catch (e: CancellationException) {
+-                    throw e
+-                } catch (_: Exception) {
+-                    null
+-                }
+-            }
+-        } ?: return null
+-        val result = try {
+-            metaRepository.getMetaFromAllAddons(apiType, imdbId)
+-                .first { it is NetworkResult.Success || it is NetworkResult.Error }
+-        } catch (e: CancellationException) {
+-            throw e
+-        } catch (_: Exception) {
+-            null
+-        }
+-        val ytId = (result as? NetworkResult.Success)?.data?.trailerYtIds?.firstOrNull()
+-            ?: return null
++        val ytId = com.nuvio.tv.data.trailer.findLatinoTrailerYtId(
++            metaRepository = metaRepository,
++            tmdbService = tmdbService,
++            itemId = itemId,
++            apiType = apiType
++        ) ?: return null
+         return trailerService.getTrailerPlaybackSourceFromYouTubeUrl(
+             youtubeUrl = "https://www.youtube.com/watch?v=$ytId",
+             title = title,
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/home/HomeViewModelPresentationPipeline.kt b/app/src/main/java/com/nuvio/tv/ui/screens/home/HomeViewModelPresentationPipeline.kt
+index f5fbecc0f..0101e301d 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/home/HomeViewModelPresentationPipeline.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/home/HomeViewModelPresentationPipeline.kt
+@@ -425,9 +425,6 @@ internal fun HomeViewModel.requestTrailerPreviewPipeline(
+     if (startupGracePeriodActive) return
+     if (ServerItemRef.isServerId(itemId)) return
+ 
+-    // Resolve fallbackYtId from catalog item if not provided
+-    val resolvedFallbackYtId = fallbackYtId ?: findCatalogItemById(itemId)?.trailerYtIds?.firstOrNull()
+-
+     // Always bump version — only the latest request (highest version) will proceed after debounce
+     activeTrailerPreviewItemId = itemId
+     trailerPreviewRequestVersion++
+@@ -463,7 +460,14 @@ internal fun HomeViewModel.requestTrailerPreviewPipeline(
+ 
+             withContext(Dispatchers.Main) {
+                 if (trailerSource?.videoUrl.isNullOrBlank()) {
+-                    val fallbackSource = resolvedFallbackYtId?.let { ytId ->
++                    // The catalog's own trailer (fallbackYtId) is usually the English one, so it is
++                    // ignored here: only a Spanish trailer from the meta addons is played.
++                    val fallbackSource = com.nuvio.tv.data.trailer.findLatinoTrailerYtId(
++                        metaRepository = metaRepository,
++                        tmdbService = tmdbService,
++                        itemId = itemId,
++                        apiType = apiType
++                    )?.let { ytId ->
+                         trailerService.getTrailerPlaybackSourceFromYouTubeUrl(
+                             youtubeUrl = "https://www.youtube.com/watch?v=$ytId",
+                             title = title,
+-- 
+2.43.0
+
