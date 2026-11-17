@@ -120,13 +120,14 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Set up the Android SDK
+        if: steps.versions.outputs.build == 'true'
+        uses: android-actions/setup-android@v4
+
       - name: Install SDK packages
         if: steps.versions.outputs.build == 'true'
-        # ubuntu-latest already ships the Android SDK and cmdline-tools; setup-android@v3 breaks
-        # because it asks for the retired `tools` package.
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-36" "build-tools;35.0.0" > /dev/null
 
       - name: Write build secrets
