@@ -45,6 +45,7 @@ import com.nuvio.tv.domain.repository.CatalogRepository
 import com.nuvio.tv.core.poster.withCustomPosterUrls
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -1484,7 +1485,16 @@ class FolderDetailViewModel @Inject constructor(
                     trailerSource
                 }
 
-                if (resolvedSource?.videoUrl.isNullOrBlank()) {
+                // Folder items are TMDB collection entries (`tmdb:<id>`), so they never reach the
+                // meta addons that can supply a trailer. When TMDB and the caller's fallback both
+                // come back empty, ask the addons through an IMDb id — the only id they answer to.
+                val finalSource = if (resolvedSource?.videoUrl.isNullOrBlank()) {
+                    resolveAddonTrailerSource(itemId, apiType, title, releaseInfo) ?: resolvedSource
+                } else {
+                    resolvedSource
+                }
+
+                if (finalSource?.videoUrl.isNullOrBlank()) {
                     // While YouTube is rate limiting, a miss isn't remembered, so the
                     // trailer comes back on a later focus once the pause is over.
                     if (!trailerService.isRateLimited()) {
@@ -1493,8 +1503,8 @@ class FolderDetailViewModel @Inject constructor(
                     _trailerPreviewUrls.update { it - itemId }
                     _trailerPreviewAudioUrls.update { it - itemId }
                 } else {
-                    _trailerPreviewUrls.update { it + (itemId to resolvedSource.videoUrl) }
-                    val audioUrl = resolvedSource.audioUrl
+                    _trailerPreviewUrls.update { it + (itemId to finalSource.videoUrl) }
+                    val audioUrl = finalSource.audioUrl
                     if (audioUrl.isNullOrBlank()) {
                         _trailerPreviewAudioUrls.update { it - itemId }
                     } else {
@@ -1505,6 +1515,56 @@ class FolderDetailViewModel @Inject constructor(
                 trailerPreviewLoadingIds.remove(itemId)
             }
         }
+    }
+
+    /**
+     * Last-resort trailer source for folder posters. The meta addons (for example a trailer-only
+     * addon) answer to IMDb ids, while collection items carry `tmdb:<id>`, so translate first.
+     * Returns null when the id cannot be translated or no addon carries a trailer for it; the
+     * caller then records the miss in the negative cache.
+     */
+    private suspend fun resolveAddonTrailerSource(
+        itemId: String,
+        apiType: String,
+        title: String,
+        releaseInfo: String?
+    ): com.nuvio.tv.data.trailer.TrailerPlaybackSource? {
+        val baseId = itemId.substringBefore(':')
+        val imdbId = if (baseId.startsWith("tt")) {
+            baseId
+        } else {
+            val tmdbId = try {
+                tmdbService.ensureTmdbId(itemId, apiType)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            tmdbId?.toIntOrNull()?.let { numericId ->
+                try {
+                    tmdbService.tmdbToImdb(numericId, apiType)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        } ?: return null
+        val result = try {
+            metaRepository.getMetaFromAllAddons(apiType, imdbId)
+                .first { it is NetworkResult.Success || it is NetworkResult.Error }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        val ytId = (result as? NetworkResult.Success)?.data?.trailerYtIds?.firstOrNull()
+            ?: return null
+        return trailerService.getTrailerPlaybackSourceFromYouTubeUrl(
+            youtubeUrl = "https://www.youtube.com/watch?v=$ytId",
+            title = title,
+            year = extractYear(releaseInfo)
+        )
     }
 
     private fun extractYear(releaseInfo: String?): String? {
