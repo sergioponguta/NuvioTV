@@ -101,6 +101,11 @@ val sentryProject = providers.environmentVariable("SENTRY_PROJECT").orNull?.trim
     ?: resolveProperty(devProperties, localProperties, "SENTRY_PROJECT").takeIf { it.isNotBlank() }
 val sentryMappingUploadEnabled = sentryAuthToken != null && sentryOrg != null && sentryProject != null
 
+// Kovalla fork: the release workflow stamps the fork release tag and a matching, monotonically
+// increasing versionCode so the in-app updater sees each rebuild (same upstream version) as newer.
+val kovallaVersionName = providers.gradleProperty("kovallaVersionName").orNull?.trim()?.takeIf { it.isNotBlank() }
+val kovallaVersionCode = providers.gradleProperty("kovallaVersionCode").orNull?.trim()?.toIntOrNull()
+
 fun env(name: String): String? = providers.environmentVariable(name).orNull
 
 fun truthy(value: String?): Boolean {
@@ -135,8 +140,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1077
-        versionName = "1.1.0"
+        versionCode = kovallaVersionCode ?: 1077
+        versionName = kovallaVersionName ?: "1.1.0"
 
         buildConfigField("String", "PARENTAL_GUIDE_API_URL", "\"${localProperties.getProperty("PARENTAL_GUIDE_API_URL", "")}\"")
         buildConfigField("String", "INTRODB_API_URL", "\"${localProperties.getProperty("INTRODB_API_URL", "")}\"")
@@ -176,8 +181,8 @@ android {
         buildConfigField("String", "SPONSOR_NAMES", buildConfigString(sponsorNames))
         buildConfigField("String", "SENTRY_DSN", buildConfigString(sentryDsn))
 
-        // In-app updater (GitHub Releases)
-        buildConfigField("String", "GITHUB_OWNER", "\"NuvioMedia\"")
+        // In-app updater (GitHub Releases) — Kovalla fork
+        buildConfigField("String", "GITHUB_OWNER", "\"sergioponguta\"")
         buildConfigField("String", "GITHUB_REPO", "\"NuvioTV\"")
     }
 
@@ -185,6 +190,9 @@ android {
     productFlavors {
         create("full") {
             dimension = "distribution"
+            // Kovalla installs side by side with the official app. Providers and the updater build
+            // their authorities from applicationId, so they follow this suffix automatically.
+            applicationIdSuffix = ".kovalla"
             buildConfigField("boolean", "FEATURE_PLUGINS_ENABLED", "true")
             buildConfigField("boolean", "FEATURE_IN_APP_UPDATES_ENABLED", "true")
             buildConfigField("boolean", "FEATURE_IN_APP_TRAILERS_ENABLED", "true")
