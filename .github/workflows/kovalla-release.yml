@@ -43,7 +43,15 @@ jobs:
           set -euo pipefail
 
           upstream=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name')
-          fork=$(gh api "repos/$FORK_REPO/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          # gh prints the JSON error body to stdout on 404, so discard stdout when the call fails.
+          fork=$(gh api "repos/$FORK_REPO/releases/latest" --jq '.tag_name' 2>/dev/null) || fork=""
+          if ! [[ "$upstream" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not read a stable tag from $UPSTREAM_REPO (got '$upstream')."
+            exit 1
+          fi
+          if ! [[ "$fork" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            fork=""
+          fi
           echo "upstream=$upstream fork=${fork:-<none>} force=${FORCE:-false}"
 
           # sort -V compares dotted numeric versions the same way semver does for these tags.
