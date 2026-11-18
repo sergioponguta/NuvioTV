@@ -1,0 +1,556 @@
+From 3341bf54ba5514ed553a47e86ac8318861f315e9 Mon Sep 17 00:00:00 2001
+From: Sergio Ponguta <sergioponguta@gmail.com>
+Date: Tue, 17 Nov 2026 19:46:30 -0500
+Subject: [PATCH] feat(kovalla): filter streams with a quality chip row
+
+A second row under the addon chips (All, 4K, 1080p, 720p, SD, Unknown) filters the
+source list by resolution, also when the addon chip is All. Only the tiers present for
+the selected addon are shown, and the row is hidden when there is a single tier.
+---
+ .../tv/ui/screens/player/StreamComponents.kt  |   6 +
+ .../ui/screens/stream/StreamQualityFilter.kt  |  57 +++++++++
+ .../tv/ui/screens/stream/StreamScreen.kt      | 100 +++++++++++++++-
+ .../ui/screens/stream/StreamScreenUiState.kt  |   3 +
+ .../screens/stream/StreamScreenViewModel.kt   | 113 +++++++++++++-----
+ .../screens/stream/StreamQualityFilterTest.kt |  65 ++++++++++
+ 6 files changed, 314 insertions(+), 30 deletions(-)
+ create mode 100644 app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamQualityFilter.kt
+ create mode 100644 app/src/test/java/com/nuvio/tv/ui/screens/stream/StreamQualityFilterTest.kt
+
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/player/StreamComponents.kt b/app/src/main/java/com/nuvio/tv/ui/screens/player/StreamComponents.kt
+index 556633fb9..166fcbabb 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/player/StreamComponents.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/player/StreamComponents.kt
+@@ -277,6 +277,7 @@ internal fun AddonFilterChips(
+     externalFocusRequesters: List<FocusRequester>? = null,
+     externalOrderedNames: List<String>? = null,
+     onUpKey: (() -> Unit)? = null,
++    onDownKey: (() -> Boolean)? = null,
+     onFocusIndexChanged: (Int) -> Unit = {},
+     chipListState: LazyListState = rememberLazyListState(),
+     debugTag: String = "AddonFilterChips"
+@@ -411,6 +412,11 @@ internal fun AddonFilterChips(
+                     onUpKey()
+                     return@onKeyEvent true
+                 }
++                if (event.key == androidx.compose.ui.input.key.Key.DirectionDown && onDownKey != null &&
++                    onDownKey()
++                ) {
++                    return@onKeyEvent true
++                }
+ 
+                 val lastIndex = if (hasRefresh) orderedNames.size + 1 else orderedNames.size
+                 val currentIdx = focusedChipIndex.coerceIn(0, lastIndex)
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamQualityFilter.kt b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamQualityFilter.kt
+new file mode 100644
+index 000000000..fa518c1b5
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamQualityFilter.kt
+@@ -0,0 +1,57 @@
++package com.nuvio.tv.ui.screens.stream
++
++import com.nuvio.tv.core.debrid.DirectDebridStreamFilter
++import com.nuvio.tv.domain.model.DebridSettings
++import com.nuvio.tv.domain.model.DebridStreamResolution
++import com.nuvio.tv.domain.model.Stream
++
++/**
++ * Resolution buckets of the quality chip row. Declaration order is the display
++ * order (best first, unknown last). The label is technical (4K/1080p), so it is
++ * not localized; UNKNOWN borrows the translated "unknown quality" string.
++ */
++enum class StreamQualityTier(val label: String) {
++    UHD("4K"),
++    QHD("1440p"),
++    FHD("1080p"),
++    HD("720p"),
++    SD("SD"),
++    UNKNOWN("")
++}
++
++/**
++ * Reuses the Direct Debrid release-name parser so addon streams get the same
++ * resolution detection as debrid ones. The DebridSettings default is deliberate:
++ * the chips must not depend on the user's debrid filters.
++ */
++internal fun streamQualityTier(stream: Stream): StreamQualityTier =
++    when (DirectDebridStreamFilter.facts(stream, DebridSettings()).resolution) {
++        DebridStreamResolution.P2160 -> StreamQualityTier.UHD
++        DebridStreamResolution.P1440 -> StreamQualityTier.QHD
++        DebridStreamResolution.P1080 -> StreamQualityTier.FHD
++        DebridStreamResolution.P720 -> StreamQualityTier.HD
++        DebridStreamResolution.P576,
++        DebridStreamResolution.P480,
++        DebridStreamResolution.P360 -> StreamQualityTier.SD
++        DebridStreamResolution.UNKNOWN -> StreamQualityTier.UNKNOWN
++    }
++
++/**
++ * Tiers present in [streams], best first. Fewer than two means there is nothing
++ * to choose between, so the chip row stays hidden (empty list).
++ */
++internal fun availableQualityTiers(
++    streams: List<Stream>,
++    tierOf: (Stream) -> StreamQualityTier
++): List<StreamQualityTier> {
++    val present = streams.mapTo(HashSet<StreamQualityTier>(), tierOf)
++    if (present.size < 2) return emptyList()
++    return StreamQualityTier.entries.filter { it in present }
++}
++
++/** Keeps the original (addon/provider) order; null tier means no filtering. */
++internal fun filterStreamsByQuality(
++    streams: List<Stream>,
++    tier: StreamQualityTier?,
++    tierOf: (Stream) -> StreamQualityTier
++): List<Stream> = if (tier == null) streams else streams.filter { tierOf(it) == tier }
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreen.kt b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreen.kt
+index a0eb308a2..68930de31 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreen.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreen.kt
+@@ -13,6 +13,8 @@ import androidx.compose.animation.core.tween
+ import androidx.compose.animation.fadeIn
+ import androidx.compose.animation.fadeOut
+ import androidx.compose.animation.slideInHorizontally
++import androidx.compose.animation.expandVertically
++import androidx.compose.animation.shrinkVertically
+ import androidx.compose.foundation.BorderStroke
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.border
+@@ -94,6 +96,7 @@ import com.nuvio.tv.core.streams.StreamBadgePlacement
+ import com.nuvio.tv.core.streams.StreamBadgeSettings
+ import com.nuvio.tv.data.local.PlayerPreference
+ import com.nuvio.tv.domain.model.Stream
++import com.nuvio.tv.ui.components.SourceStatusFilterChip
+ import com.nuvio.tv.ui.components.SourceChipItem
+ import com.nuvio.tv.ui.components.SourceChipStatus
+ import com.nuvio.tv.ui.components.P2pConsentDialog
+@@ -469,6 +472,9 @@ fun StreamScreen(
+                     availableAddons = uiState.availableAddons,
+                     sourceChips = uiState.sourceChips,
+                     selectedAddonFilter = uiState.selectedAddonFilter,
++                    selectedQualityFilter = uiState.selectedQualityFilter,
++                    availableQualityTiers = uiState.availableQualityTiers,
++                    onQualityFilterSelected = { viewModel.onEvent(StreamScreenEvent.OnQualityFilterSelected(it)) },
+                     showFileSizeBadges = streamBadgeSettings.showFileSizeBadges,
+                     showAddonLogo = streamBadgeSettings.showAddonLogo,
+                     badgePlacement = streamBadgeSettings.badgePlacement,
+@@ -766,6 +772,9 @@ private fun RightStreamSection(
+     availableAddons: List<String>,
+     sourceChips: List<SourceChipItem>,
+     selectedAddonFilter: String?,
++    selectedQualityFilter: StreamQualityTier?,
++    availableQualityTiers: List<StreamQualityTier>,
++    onQualityFilterSelected: (StreamQualityTier?) -> Unit,
+     showFileSizeBadges: Boolean,
+     showAddonLogo: Boolean,
+     badgePlacement: StreamBadgePlacement,
+@@ -815,6 +824,13 @@ private fun RightStreamSection(
+         }
+     }
+     val chipListState = rememberLazyListState()
++    val qualityOptions = remember(availableQualityTiers) { listOf<StreamQualityTier?>(null) + availableQualityTiers }
++    val qualityFocusRequesters = remember(qualityOptions) { List(qualityOptions.size) { FocusRequester() } }
++    fun requestQualityFocus() {
++        userMovedFromFirstResult = true
++        val idx = qualityOptions.indexOf(selectedQualityFilter).coerceAtLeast(0)
++        runCatching { qualityFocusRequesters[idx].requestFocus() }
++    }
+     fun onAddonFilterSelectedGuarded(addon: String?) {
+         userMovedFromFirstResult = true
+         val targetRequester = if (addon == null) {
+@@ -949,11 +965,40 @@ private fun RightStreamSection(
+                             externalFocusRequesters = chipFocusRequesters,
+                             externalOrderedNames = orderedAddonNames,
+                             chipListState = chipListState,
++                            onDownKey = {
++                                if (availableQualityTiers.isNotEmpty()) {
++                                    requestQualityFocus()
++                                    true
++                                } else false
++                            },
+                             debugTag = "StreamScreen"
+                         )
+                     }
+                 }
+ 
++                // Quality chips: filter the (possibly "All") list by resolution
++                AnimatedVisibility(
++                    visible = availableQualityTiers.isNotEmpty(),
++                    enter = fadeIn(animationSpec = tween(300)) + expandVertically(animationSpec = tween(300)),
++                    exit = fadeOut(animationSpec = tween(300)) + shrinkVertically(animationSpec = tween(300))
++                ) {
++                    QualityFilterChips(
++                        tiers = availableQualityTiers,
++                        selectedTier = selectedQualityFilter,
++                        focusRequesters = qualityFocusRequesters,
++                        onTierSelected = {
++                            userMovedFromFirstResult = true
++                            onQualityFilterSelected(it)
++                        },
++                        onUpKey = {
++                            requestChipFocus(
++                                if (selectedAddonFilter == null) 1
++                                else orderedAddonNames.indexOf(selectedAddonFilter) + 2
++                            )
++                        }
++                    )
++                }
++
+                 // Streams / loading / error / empty
+                 Box(
+                     modifier = Modifier
+@@ -993,7 +1038,10 @@ private fun RightStreamSection(
+                                 hasBadgeRules = hasBadgeRules,
+                                 onAddonFilterSelected = { onAddonFilterSelectedGuarded(it) },
+                                 orderedAddonNames = orderedAddonNames,
+-                                onRequestChipFocus = { requestChipFocus(it) },
++                                onRequestChipFocus = { idx ->
++                                    if (availableQualityTiers.isNotEmpty()) requestQualityFocus()
++                                    else requestChipFocus(idx)
++                                },
+                                 onUserNavigatedFromFirstResult = {
+                                     userMovedFromFirstResult = true
+                                 },
+@@ -1660,3 +1708,53 @@ internal fun PlayerChoiceDialog(
+         }
+     }
+ }
++
++@Composable
++private fun QualityFilterChips(
++    tiers: List<StreamQualityTier>,
++    selectedTier: StreamQualityTier?,
++    focusRequesters: List<FocusRequester>,
++    onTierSelected: (StreamQualityTier?) -> Unit,
++    onUpKey: () -> Unit
++) {
++    val isRtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
++    val options = remember(tiers) { listOf<StreamQualityTier?>(null) + tiers }
++    var focusedIndex by remember { mutableStateOf(0) }
++    // Like the addon chips: moving sideways selects, so the list follows the focus.
++    fun moveTo(target: Int) {
++        if (target !in options.indices) return
++        onTierSelected(options[target])
++        runCatching { focusRequesters.getOrNull(target)?.requestFocus() }
++    }
++    Row(
++        modifier = Modifier
++            .height(NuvioTheme.spacing.huge)
++            .padding(horizontal = NuvioTheme.spacing.sm)
++            .onKeyEvent { event ->
++                if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
++                when (event.key) {
++                    Key.DirectionUp -> { onUpKey(); true }
++                    Key.DirectionLeft -> { moveTo(focusedIndex + if (isRtl) 1 else -1); true }
++                    Key.DirectionRight -> { moveTo(focusedIndex + if (isRtl) -1 else 1); true }
++                    else -> false
++                }
++            },
++        horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm),
++        verticalAlignment = Alignment.CenterVertically
++    ) {
++        options.forEachIndexed { index, tier ->
++            SourceStatusFilterChip(
++                name = when (tier) {
++                    null -> stringResource(R.string.stream_filter_all)
++                    StreamQualityTier.UNKNOWN -> stringResource(R.string.stream_quality_unknown)
++                    else -> tier.label
++                },
++                isSelected = tier == selectedTier,
++                onClick = { onTierSelected(tier) },
++                modifier = Modifier
++                    .then(focusRequesters.getOrNull(index)?.let { Modifier.focusRequester(it) } ?: Modifier)
++                    .onFocusChanged { if (it.isFocused) focusedIndex = index }
++            )
++        }
++    }
++}
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenUiState.kt b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenUiState.kt
+index 547aec2e6..304316f5d 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenUiState.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenUiState.kt
+@@ -30,6 +30,8 @@ data class StreamScreenUiState(
+     val addonStreams: List<AddonStreams> = emptyList(),
+     val allStreams: List<Stream> = emptyList(),
+     val selectedAddonFilter: String? = null, // null means "All"
++    val selectedQualityFilter: StreamQualityTier? = null, // null means "All"
++    val availableQualityTiers: List<StreamQualityTier> = emptyList(),
+     val filteredStreams: List<Stream> = emptyList(),
+     val availableAddons: List<String> = emptyList(),
+     val sourceChips: List<SourceChipItem> = emptyList(),
+@@ -43,6 +45,7 @@ data class StreamScreenUiState(
+ 
+ sealed class StreamScreenEvent {
+     data class OnAddonFilterSelected(val addonName: String?) : StreamScreenEvent()
++    data class OnQualityFilterSelected(val tier: StreamQualityTier?) : StreamScreenEvent()
+     data class OnStreamSelected(val stream: Stream) : StreamScreenEvent()
+     data object OnAutoPlayConsumed : StreamScreenEvent()
+     data object OnRefresh : StreamScreenEvent()
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt
+index 3d3eefb68..0299a658a 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt
+@@ -119,6 +119,7 @@ class StreamScreenViewModel @Inject constructor(
+     private var streamBadgePresentationJob: Job? = null
+     private var streamFilterExpandJob: Job? = null
+     private var streamFilterFullList: List<Stream> = emptyList()
++    private val streamQualityTierCache = java.util.concurrent.ConcurrentHashMap<String, StreamQualityTier>()
+     private var streamBadgePresentationRequestId = 0L
+     private var badgedAddonNames: Set<String> = emptySet()
+     private var playbackMetaVideos: List<Video>? = null
+@@ -260,12 +261,12 @@ class StreamScreenViewModel @Inject constructor(
+                             )
+                         }
+                         val updatedAllStreams = updatedAddonStreams.flatMap { it.streams }
+-                        val currentFilter = state.selectedAddonFilter
+-                        val fullFiltered = groupStreamsByProvider(if (currentFilter == null) {
+-                            updatedAllStreams
+-                        } else {
+-                            updatedAllStreams.filter { it.addonName == currentFilter }
+-                        })
++                        val filtered = applyStreamFilters(
++                            updatedAllStreams,
++                            state.selectedAddonFilter,
++                            state.selectedQualityFilter
++                        )
++                        val fullFiltered = filtered.streams
+                         streamFilterFullList = fullFiltered
+                         val pageEnd = state.filteredStreams.size
+                             .coerceAtLeast(STREAM_FILTER_PAGE_SIZE.coerceAtMost(fullFiltered.size))
+@@ -273,6 +274,8 @@ class StreamScreenViewModel @Inject constructor(
+                         state.copy(
+                             addonStreams = updatedAddonStreams,
+                             allStreams = updatedAllStreams,
++                            availableQualityTiers = filtered.qualityTiers,
++                            selectedQualityFilter = filtered.qualityFilter,
+                             filteredStreams = if (pageEnd >= fullFiltered.size) fullFiltered
+                                 else fullFiltered.subList(0, pageEnd)
+                         )
+@@ -348,12 +351,16 @@ class StreamScreenViewModel @Inject constructor(
+                     )
+                 }
+             }
++            is StreamScreenEvent.OnQualityFilterSelected -> filterByQuality(event.tier)
+             StreamScreenEvent.OnRefresh -> {
++                streamQualityTierCache.clear()
+                 updateUiStateIfChanged {
+                     it.copy(
+                         isLoading = true,
+                         error = null,
+                         selectedAddonFilter = null,
++                        selectedQualityFilter = null,
++                        availableQualityTiers = emptyList(),
+                         filteredStreams = emptyList()
+                     )
+                 }
+@@ -658,12 +665,12 @@ class StreamScreenViewModel @Inject constructor(
+                     resolvedAutoPlayTarget = true
+                 }
+ 
+-                val currentFilter = _uiState.value.selectedAddonFilter
+-                val fullFiltered = groupStreamsByProvider(if (currentFilter == null) {
+-                    allStreams
+-                } else {
+-                    allStreams.filter { it.addonName == currentFilter }
+-                })
++                val filtered = applyStreamFilters(
++                    allStreams,
++                    _uiState.value.selectedAddonFilter,
++                    _uiState.value.selectedQualityFilter
++                )
++                val fullFiltered = filtered.streams
+                 streamFilterFullList = fullFiltered
+                 val currentPageSize = _uiState.value.filteredStreams.size
+                 val isFirstLoad = currentPageSize == 0
+@@ -679,6 +686,8 @@ class StreamScreenViewModel @Inject constructor(
+                         addonStreams = mergedAddonStreams,
+                         allStreams = allStreams,
+                         filteredStreams = paginatedStreams,
++                        availableQualityTiers = filtered.qualityTiers,
++                        selectedQualityFilter = filtered.qualityFilter,
+                         availableAddons = availableAddons,
+                         sourceChips = mergeSourceChipStatuses(
+                             existing = _uiState.value.sourceChips,
+@@ -769,12 +778,12 @@ class StreamScreenViewModel @Inject constructor(
+                                 val updatedAllStreams = updatedGroups.flatMap { addonStreams ->
+                                     addonStreams.streams
+                                 }
+-                                val currentFilter = state.selectedAddonFilter
+-                                val fullFiltered = groupStreamsByProvider(if (currentFilter == null) {
+-                                    updatedAllStreams
+-                                } else {
+-                                    updatedAllStreams.filter { it.addonName == currentFilter }
+-                                })
++                                val filtered = applyStreamFilters(
++                                    updatedAllStreams,
++                                    state.selectedAddonFilter,
++                                    state.selectedQualityFilter
++                                )
++                                val fullFiltered = filtered.streams
+                                 streamFilterFullList = fullFiltered
+                                 val pageEnd = state.filteredStreams.size
+                                     .coerceAtLeast(STREAM_FILTER_PAGE_SIZE.coerceAtMost(fullFiltered.size))
+@@ -782,6 +791,8 @@ class StreamScreenViewModel @Inject constructor(
+                                 state.copy(
+                                     addonStreams = updatedGroups,
+                                     allStreams = updatedAllStreams,
++                                    availableQualityTiers = filtered.qualityTiers,
++                                    selectedQualityFilter = filtered.qualityFilter,
+                                     filteredStreams = if (pageEnd >= fullFiltered.size) fullFiltered
+                                         else fullFiltered.subList(0, pageEnd)
+                                 )
+@@ -1274,24 +1285,68 @@ class StreamScreenViewModel @Inject constructor(
+             if (state.selectedAddonFilter == addonName) {
+                 return@updateUiStateIfChanged state
+             }
+-            val fullFiltered = groupStreamsByProvider(if (addonName == null) {
+-                state.allStreams
+-            } else {
+-                state.allStreams.filter { it.addonName == addonName }
+-            })
+-            streamFilterFullList = fullFiltered
+-            val paginatedStreams = if (fullFiltered.size > STREAM_FILTER_PAGE_SIZE) {
+-                fullFiltered.subList(0, STREAM_FILTER_PAGE_SIZE)
+-            } else {
+-                fullFiltered
+-            }
++            val filtered = applyStreamFilters(state.allStreams, addonName, state.selectedQualityFilter)
++            val paginatedStreams = firstPage(filtered.streams)
+             state.copy(
+                 selectedAddonFilter = addonName,
++                availableQualityTiers = filtered.qualityTiers,
++                selectedQualityFilter = filtered.qualityFilter,
+                 filteredStreams = paginatedStreams
+             )
+         }
+     }
+ 
++    private fun filterByQuality(tier: StreamQualityTier?) {
++        streamFilterExpandJob?.cancel()
++        updateUiStateIfChanged { state ->
++            if (state.selectedQualityFilter == tier) {
++                return@updateUiStateIfChanged state
++            }
++            val filtered = applyStreamFilters(state.allStreams, state.selectedAddonFilter, tier)
++            state.copy(
++                availableQualityTiers = filtered.qualityTiers,
++                selectedQualityFilter = filtered.qualityFilter,
++                filteredStreams = firstPage(filtered.streams)
++            )
++        }
++    }
++
++    private fun cachedStreamQualityTier(stream: Stream): StreamQualityTier =
++        streamQualityTierCache.getOrPut(stream.badgeMergeKey()) { streamQualityTier(stream) }
++
++    private class StreamFilterResult(
++        val streams: List<Stream>,
++        val qualityTiers: List<StreamQualityTier>,
++        val qualityFilter: StreamQualityTier?
++    )
++
++    /**
++     * Addon filter first, then the quality chips of what is left. A quality that is
++     * not available for the current addon (or when only one quality exists) falls
++     * back to "All" instead of leaving an empty list behind a hidden row.
++     */
++    private fun applyStreamFilters(
++        allStreams: List<Stream>,
++        addonFilter: String?,
++        qualityFilter: StreamQualityTier?
++    ): StreamFilterResult {
++        val byAddon = if (addonFilter == null) {
++            allStreams
++        } else {
++            allStreams.filter { it.addonName == addonFilter }
++        }
++        val tiers = availableQualityTiers(byAddon, ::cachedStreamQualityTier)
++        val quality = qualityFilter?.takeIf { it in tiers }
++        val full = groupStreamsByProvider(
++            filterStreamsByQuality(byAddon, quality, ::cachedStreamQualityTier)
++        )
++        streamFilterFullList = full
++        return StreamFilterResult(full, tiers, quality)
++    }
++
++    private fun firstPage(full: List<Stream>): List<Stream> =
++        if (full.size > STREAM_FILTER_PAGE_SIZE) full.subList(0, STREAM_FILTER_PAGE_SIZE) else full
++
+     fun expandFilteredStreamsIfNeeded() {
+         val current = _uiState.value.filteredStreams
+         val full = streamFilterFullList
+diff --git a/app/src/test/java/com/nuvio/tv/ui/screens/stream/StreamQualityFilterTest.kt b/app/src/test/java/com/nuvio/tv/ui/screens/stream/StreamQualityFilterTest.kt
+new file mode 100644
+index 000000000..513ad0ba4
+--- /dev/null
++++ b/app/src/test/java/com/nuvio/tv/ui/screens/stream/StreamQualityFilterTest.kt
+@@ -0,0 +1,65 @@
++package com.nuvio.tv.ui.screens.stream
++
++import com.nuvio.tv.domain.model.Stream
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class StreamQualityFilterTest {
++
++    private fun stream(name: String, addon: String = "Addon") = Stream(
++        name = name,
++        title = name,
++        description = null,
++        url = "https://example.test/$addon/${name.hashCode()}",
++        ytId = null,
++        infoHash = null,
++        fileIdx = null,
++        externalUrl = null,
++        behaviorHints = null,
++        addonName = addon,
++        addonLogo = null
++    )
++
++    @Test
++    fun detectsTheTierFromTheReleaseName() {
++        assertEquals(StreamQualityTier.UHD, streamQualityTier(stream("Movie 2160p HDR")))
++        assertEquals(StreamQualityTier.FHD, streamQualityTier(stream("Movie 1080p WEB-DL")))
++        assertEquals(StreamQualityTier.HD, streamQualityTier(stream("Movie 720p")))
++        assertEquals(StreamQualityTier.SD, streamQualityTier(stream("Movie 480p")))
++        assertEquals(StreamQualityTier.UNKNOWN, streamQualityTier(stream("Movie without quality")))
++    }
++
++    @Test
++    fun listsOnlyThePresentTiersBestFirst() {
++        val streams = listOf(
++            stream("Movie 720p"),
++            stream("Movie 4K"),
++            stream("Movie without quality"),
++            stream("Another 720p")
++        )
++
++        assertEquals(
++            listOf(StreamQualityTier.UHD, StreamQualityTier.HD, StreamQualityTier.UNKNOWN),
++            availableQualityTiers(streams, ::streamQualityTier)
++        )
++    }
++
++    @Test
++    fun hidesTheRowWhenThereIsNothingToChooseFrom() {
++        val streams = listOf(stream("Movie 1080p"), stream("Another 1080p"))
++
++        assertEquals(emptyList<StreamQualityTier>(), availableQualityTiers(streams, ::streamQualityTier))
++        assertEquals(emptyList<StreamQualityTier>(), availableQualityTiers(emptyList(), ::streamQualityTier))
++    }
++
++    @Test
++    fun filtersByTierKeepingTheAddonOrder() {
++        val a1080 = stream("A 1080p", addon = "A")
++        val b720 = stream("B 720p", addon = "B")
++        val c1080 = stream("C 1080p", addon = "C")
++        val streams = listOf(a1080, b720, c1080)
++
++        assertEquals(listOf(a1080, c1080), filterStreamsByQuality(streams, StreamQualityTier.FHD, ::streamQualityTier))
++        assertEquals(streams, filterStreamsByQuality(streams, null, ::streamQualityTier))
++    }
++}
+-- 
+2.43.0
+

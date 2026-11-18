@@ -28,10 +28,11 @@ desde la rama por defecto.
    Sin tráiler latino no se reproduce nada. Si la petición compartida responde «el meta del
    catálogo basta» (sin tráilers), se reintenta hasta tres veces.
 
-5. **Fuentes ordenadas por calidad**: el chip «Calidad» de la pantalla de fuentes ordena todos
-   los resultados por resolución (4K, 1080p, 720p, SD) y, dentro de cada grupo, por HDR/DV, tipo
-   de rip y tamaño; cada grupo lleva su cabecera. Reutiliza el parser de releases de Direct Debrid,
-   así que funciona igual con addons normales, y el mismo chip devuelve el orden por addon.
+5. **Filtro de calidad en las fuentes**: una segunda fila de chips bajo los de addons (Todos, 4K,
+   1080p, 720p, SD, Desconocido) filtra la lista por resolución, también con el addon «Todos».
+   Solo salen las resoluciones que hay para el addon elegido y la fila se oculta si hay una sola.
+   Reutiliza el parser de releases de Direct Debrid, así que vale para cualquier addon. Izquierda y
+   derecha seleccionan como en los chips de addons; arriba desde la lista cae en esta fila.
 
 ## Esquema de versiones (importante para el actualizador)
 
