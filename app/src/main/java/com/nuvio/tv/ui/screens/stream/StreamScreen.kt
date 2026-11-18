@@ -96,6 +96,7 @@ import com.nuvio.tv.data.local.PlayerPreference
 import com.nuvio.tv.domain.model.Stream
 import com.nuvio.tv.ui.components.SourceChipItem
 import com.nuvio.tv.ui.components.SourceChipStatus
+import com.nuvio.tv.ui.components.SourceStatusFilterChip
 import com.nuvio.tv.ui.components.P2pConsentDialog
 import com.nuvio.tv.ui.components.StreamBadgeChips
 import com.nuvio.tv.ui.components.StreamsSkeletonList
@@ -469,6 +470,8 @@ fun StreamScreen(
                     availableAddons = uiState.availableAddons,
                     sourceChips = uiState.sourceChips,
                     selectedAddonFilter = uiState.selectedAddonFilter,
+                    qualitySortEnabled = uiState.qualitySortEnabled,
+                    onToggleQualitySort = { viewModel.onEvent(StreamScreenEvent.OnToggleQualitySort) },
                     showFileSizeBadges = streamBadgeSettings.showFileSizeBadges,
                     showAddonLogo = streamBadgeSettings.showAddonLogo,
                     badgePlacement = streamBadgeSettings.badgePlacement,
@@ -766,6 +769,8 @@ private fun RightStreamSection(
     availableAddons: List<String>,
     sourceChips: List<SourceChipItem>,
     selectedAddonFilter: String?,
+    qualitySortEnabled: Boolean,
+    onToggleQualitySort: () -> Unit,
     showFileSizeBadges: Boolean,
     showAddonLogo: Boolean,
     badgePlacement: StreamBadgePlacement,
@@ -815,6 +820,7 @@ private fun RightStreamSection(
         }
     }
     val chipListState = rememberLazyListState()
+    val qualityFocusRequester = remember { FocusRequester() }
     fun onAddonFilterSelectedGuarded(addon: String?) {
         userMovedFromFirstResult = true
         val targetRequester = if (addon == null) {
@@ -928,30 +934,53 @@ private fun RightStreamSection(
                     }
                 }
 
-                // Addon filter chips
-                Box(modifier = Modifier.height(NuvioTheme.spacing.huge)) {
-                    androidx.compose.animation.AnimatedVisibility(
-                        visible = sourceChips.isNotEmpty() || (!isLoading && availableAddons.isNotEmpty()),
-                        enter = fadeIn(animationSpec = tween(300)),
-                        exit = fadeOut(animationSpec = tween(300))
-                    ) {
-                        AddonFilterChips(
-                            addons = availableAddons,
-                            sourceChips = sourceChips,
-                            selectedAddon = selectedAddonFilter,
-                            isStillFetching = sourceChips.any { it.status == SourceChipStatus.LOADING },
-                            onRefresh = {
-                                userMovedFromFirstResult = false
-                                firstResultFocusAssigned = false
-                                onRefresh()
-                            },
-                            onAddonSelected = { onAddonFilterSelected(it) },
-                            externalFocusRequesters = chipFocusRequesters,
-                            externalOrderedNames = orderedAddonNames,
-                            chipListState = chipListState,
-                            debugTag = "StreamScreen"
-                        )
+                // Addon filter chips + quality order toggle
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(NuvioTheme.spacing.huge),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = sourceChips.isNotEmpty() || (!isLoading && availableAddons.isNotEmpty()),
+                            enter = fadeIn(animationSpec = tween(300)),
+                            exit = fadeOut(animationSpec = tween(300))
+                        ) {
+                            AddonFilterChips(
+                                addons = availableAddons,
+                                sourceChips = sourceChips,
+                                selectedAddon = selectedAddonFilter,
+                                isStillFetching = sourceChips.any { it.status == SourceChipStatus.LOADING },
+                                onRefresh = {
+                                    userMovedFromFirstResult = false
+                                    firstResultFocusAssigned = false
+                                    onRefresh()
+                                },
+                                onAddonSelected = { onAddonFilterSelected(it) },
+                                externalFocusRequesters = chipFocusRequesters,
+                                externalOrderedNames = orderedAddonNames,
+                                chipListState = chipListState,
+                                onRightBoundary = { runCatching { qualityFocusRequester.requestFocus() } },
+                                debugTag = "StreamScreen"
+                            )
+                        }
                     }
+                    SourceStatusFilterChip(
+                        name = stringResource(R.string.stream_sort_quality),
+                        isSelected = qualitySortEnabled,
+                        onClick = onToggleQualitySort,
+                        modifier = Modifier
+                            .padding(start = NuvioTheme.spacing.sm)
+                            .focusRequester(qualityFocusRequester)
+                            .onKeyEvent { event ->
+                                if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
+                                if (event.key == Key.DirectionLeft) {
+                                    requestChipFocus(chipFocusRequesters.lastIndex)
+                                    true
+                                } else false
+                            }
+                    )
                 }
 
                 // Streams / loading / error / empty
@@ -987,6 +1016,7 @@ private fun RightStreamSection(
                                 firstStreamFocusRequestId = firstStreamFocusRequestId,
                                 availableAddons = availableAddons,
                                 selectedAddonFilter = selectedAddonFilter,
+                                sortByQuality = qualitySortEnabled,
                                 showFileSizeBadges = showFileSizeBadges,
                                 showAddonLogo = showAddonLogo,
                                 badgePlacement = badgePlacement,
@@ -1110,6 +1140,7 @@ private fun StreamsList(
     firstStreamFocusRequestId: Int = 0,
     availableAddons: List<String> = emptyList(),
     selectedAddonFilter: String? = null,
+    sortByQuality: Boolean = false,
     showFileSizeBadges: Boolean = true,
     showAddonLogo: Boolean = true,
     badgePlacement: StreamBadgePlacement = StreamBadgePlacement.BOTTOM,
@@ -1145,6 +1176,10 @@ private fun StreamsList(
     val sharedFocusRequester = remember { FocusRequester() }
     var sharedCardHasFocus by remember { mutableStateOf(false) }
     val partySourceLabel = stringResource(R.string.party_source)
+    val qualityTierCache = remember { mutableMapOf<String, StreamQualityTier>() }
+    val qualityTierOf: (Stream) -> StreamQualityTier = { stream ->
+        qualityTierCache.getOrPut(stream.badgeMergeKey()) { streamQualityFacts(stream).tier }
+    }
 
     var focusedStreamKey by remember { mutableStateOf<String?>(null) }
     val prevStreamKeysRef = remember { mutableStateOf(streamKeys) }
@@ -1309,7 +1344,13 @@ private fun StreamsList(
                 modifier = Modifier.padding(vertical = NuvioTheme.spacing.xs),
                 verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)
             ) {
-                StreamProviderHeader(streamProviderHeader(stream, streams.getOrNull(index - 1)))
+                if (sortByQuality) {
+                    StreamQualityHeader(
+                        streamQualityHeaderTier(stream, streams.getOrNull(index - 1), qualityTierOf)
+                    )
+                } else {
+                    StreamProviderHeader(streamProviderHeader(stream, streams.getOrNull(index - 1)))
+                }
                 val isPartySource = partySource?.matches(stream) == true
                 StreamCard(
                     stream = stream,
@@ -1355,6 +1396,21 @@ private fun StreamProviderHeader(sourceName: String?) {
             color = NuvioTheme.extendedColors.textSecondary
         )
     }
+}
+
+@Composable
+private fun StreamQualityHeader(tier: StreamQualityTier?) {
+    if (tier == null) return
+    Text(
+        text = if (tier == StreamQualityTier.UNKNOWN) {
+            stringResource(R.string.stream_quality_unknown)
+        } else {
+            tier.label
+        },
+        modifier = Modifier.padding(start = NuvioTheme.spacing.lg),
+        style = MaterialTheme.typography.labelSmall,
+        color = NuvioTheme.extendedColors.textSecondary
+    )
 }
 
 @OptIn(ExperimentalTvMaterial3Api::class)

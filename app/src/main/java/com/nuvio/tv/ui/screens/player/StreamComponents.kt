@@ -277,6 +277,7 @@ internal fun AddonFilterChips(
     externalFocusRequesters: List<FocusRequester>? = null,
     externalOrderedNames: List<String>? = null,
     onUpKey: (() -> Unit)? = null,
+    onRightBoundary: (() -> Unit)? = null,
     onFocusIndexChanged: (Int) -> Unit = {},
     chipListState: LazyListState = rememberLazyListState(),
     debugTag: String = "AddonFilterChips"
@@ -426,7 +427,10 @@ internal fun AddonFilterChips(
                         if (isRtl) {
                             if (currentIdx > 0) { moveFocusTo(currentIdx - 1); true } else true
                         } else {
-                            if (currentIdx < lastIndex) { moveFocusTo(currentIdx + 1); true } else true
+                            if (currentIdx < lastIndex) { moveFocusTo(currentIdx + 1); true } else {
+                                onRightBoundary?.invoke()
+                                true
+                            }
                         }
                     }
                     else -> false

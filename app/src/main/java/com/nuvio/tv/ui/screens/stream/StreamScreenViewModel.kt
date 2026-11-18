@@ -119,6 +119,7 @@ class StreamScreenViewModel @Inject constructor(
     private var streamBadgePresentationJob: Job? = null
     private var streamFilterExpandJob: Job? = null
     private var streamFilterFullList: List<Stream> = emptyList()
+    private val streamQualityFactsCache = java.util.concurrent.ConcurrentHashMap<String, StreamQualityFacts>()
     private var streamBadgePresentationRequestId = 0L
     private var badgedAddonNames: Set<String> = emptySet()
     private var playbackMetaVideos: List<Video>? = null
@@ -260,12 +261,11 @@ class StreamScreenViewModel @Inject constructor(
                             )
                         }
                         val updatedAllStreams = updatedAddonStreams.flatMap { it.streams }
-                        val currentFilter = state.selectedAddonFilter
-                        val fullFiltered = groupStreamsByProvider(if (currentFilter == null) {
-                            updatedAllStreams
-                        } else {
-                            updatedAllStreams.filter { it.addonName == currentFilter }
-                        })
+                        val fullFiltered = displayStreams(
+                            updatedAllStreams,
+                            state.selectedAddonFilter,
+                            state.qualitySortEnabled
+                        )
                         streamFilterFullList = fullFiltered
                         val pageEnd = state.filteredStreams.size
                             .coerceAtLeast(STREAM_FILTER_PAGE_SIZE.coerceAtMost(fullFiltered.size))
@@ -348,7 +348,27 @@ class StreamScreenViewModel @Inject constructor(
                     )
                 }
             }
+            StreamScreenEvent.OnToggleQualitySort -> {
+                updateUiStateIfChanged { state ->
+                    val enabled = !state.qualitySortEnabled
+                    val fullFiltered = displayStreams(
+                        state.allStreams,
+                        state.selectedAddonFilter,
+                        enabled
+                    )
+                    streamFilterFullList = fullFiltered
+                    val pageEnd = state.filteredStreams.size
+                        .coerceAtLeast(STREAM_FILTER_PAGE_SIZE.coerceAtMost(fullFiltered.size))
+                        .coerceAtMost(fullFiltered.size)
+                    state.copy(
+                        qualitySortEnabled = enabled,
+                        filteredStreams = if (pageEnd >= fullFiltered.size) fullFiltered
+                            else fullFiltered.subList(0, pageEnd)
+                    )
+                }
+            }
             StreamScreenEvent.OnRefresh -> {
+                streamQualityFactsCache.clear()
                 updateUiStateIfChanged {
                     it.copy(
                         isLoading = true,
@@ -659,11 +679,11 @@ class StreamScreenViewModel @Inject constructor(
                 }
 
                 val currentFilter = _uiState.value.selectedAddonFilter
-                val fullFiltered = groupStreamsByProvider(if (currentFilter == null) {
-                    allStreams
-                } else {
-                    allStreams.filter { it.addonName == currentFilter }
-                })
+                val fullFiltered = displayStreams(
+                    allStreams,
+                    currentFilter,
+                    _uiState.value.qualitySortEnabled
+                )
                 streamFilterFullList = fullFiltered
                 val currentPageSize = _uiState.value.filteredStreams.size
                 val isFirstLoad = currentPageSize == 0
@@ -769,12 +789,11 @@ class StreamScreenViewModel @Inject constructor(
                                 val updatedAllStreams = updatedGroups.flatMap { addonStreams ->
                                     addonStreams.streams
                                 }
-                                val currentFilter = state.selectedAddonFilter
-                                val fullFiltered = groupStreamsByProvider(if (currentFilter == null) {
-                                    updatedAllStreams
-                                } else {
-                                    updatedAllStreams.filter { it.addonName == currentFilter }
-                                })
+                                val fullFiltered = displayStreams(
+                                    updatedAllStreams,
+                                    state.selectedAddonFilter,
+                                    state.qualitySortEnabled
+                                )
                                 streamFilterFullList = fullFiltered
                                 val pageEnd = state.filteredStreams.size
                                     .coerceAtLeast(STREAM_FILTER_PAGE_SIZE.coerceAtMost(fullFiltered.size))
@@ -1268,17 +1287,30 @@ class StreamScreenViewModel @Inject constructor(
         return parseRuntimeMinutes(meta.runtime)
     }
 
+    private fun cachedStreamQualityFacts(stream: Stream): StreamQualityFacts =
+        streamQualityFactsCache.getOrPut(stream.badgeMergeKey()) { streamQualityFacts(stream) }
+
+    private fun displayStreams(
+        allStreams: List<Stream>,
+        addonFilter: String?,
+        sortByQuality: Boolean
+    ): List<Stream> {
+        val filtered = if (addonFilter == null) {
+            allStreams
+        } else {
+            allStreams.filter { it.addonName == addonFilter }
+        }
+        val grouped = groupStreamsByProvider(filtered)
+        return if (sortByQuality) sortStreamsByQuality(grouped, ::cachedStreamQualityFacts) else grouped
+    }
+
     private fun filterByAddon(addonName: String?) {
         streamFilterExpandJob?.cancel()
         updateUiStateIfChanged { state ->
             if (state.selectedAddonFilter == addonName) {
                 return@updateUiStateIfChanged state
             }
-            val fullFiltered = groupStreamsByProvider(if (addonName == null) {
-                state.allStreams
-            } else {
-                state.allStreams.filter { it.addonName == addonName }
-            })
+            val fullFiltered = displayStreams(state.allStreams, addonName, state.qualitySortEnabled)
             streamFilterFullList = fullFiltered
             val paginatedStreams = if (fullFiltered.size > STREAM_FILTER_PAGE_SIZE) {
                 fullFiltered.subList(0, STREAM_FILTER_PAGE_SIZE)
@@ -2107,7 +2139,7 @@ class StreamScreenViewModel @Inject constructor(
 
 }
 
-private fun Stream.badgeMergeKey(): String {
+internal fun Stream.badgeMergeKey(): String {
     infoHash?.lowercase()?.let { hash -> return "$addonName|$hash:${fileIdx ?: ""}" }
     // Use the playable URL as primary key - but for streams without a playable URL
     // (e.g. statistic/informational entries that only have externalUrl), fall back
