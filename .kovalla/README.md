@@ -28,6 +28,11 @@ desde la rama por defecto.
    Sin tráiler latino no se reproduce nada. Si la petición compartida responde «el meta del
    catálogo basta» (sin tráilers), se reintenta hasta tres veces.
 
+5. **Fuentes ordenadas por calidad**: el chip «Calidad» de la pantalla de fuentes ordena todos
+   los resultados por resolución (4K, 1080p, 720p, SD) y, dentro de cada grupo, por HDR/DV, tipo
+   de rip y tamaño; cada grupo lleva su cabecera. Reutiliza el parser de releases de Direct Debrid,
+   así que funciona igual con addons normales, y el mismo chip devuelve el orden por addon.
+
 ## Esquema de versiones (importante para el actualizador)
 
 El actualizador compara el **tag** de la release con `BuildConfig.VERSION_NAME` usando semver, y
