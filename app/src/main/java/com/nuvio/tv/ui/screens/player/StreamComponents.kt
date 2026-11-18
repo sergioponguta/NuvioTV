@@ -277,7 +277,7 @@ internal fun AddonFilterChips(
     externalFocusRequesters: List<FocusRequester>? = null,
     externalOrderedNames: List<String>? = null,
     onUpKey: (() -> Unit)? = null,
-    onRightBoundary: (() -> Unit)? = null,
+    onDownKey: (() -> Boolean)? = null,
     onFocusIndexChanged: (Int) -> Unit = {},
     chipListState: LazyListState = rememberLazyListState(),
     debugTag: String = "AddonFilterChips"
@@ -412,6 +412,11 @@ internal fun AddonFilterChips(
                     onUpKey()
                     return@onKeyEvent true
                 }
+                if (event.key == androidx.compose.ui.input.key.Key.DirectionDown && onDownKey != null &&
+                    onDownKey()
+                ) {
+                    return@onKeyEvent true
+                }
 
                 val lastIndex = if (hasRefresh) orderedNames.size + 1 else orderedNames.size
                 val currentIdx = focusedChipIndex.coerceIn(0, lastIndex)
@@ -427,10 +432,7 @@ internal fun AddonFilterChips(
                         if (isRtl) {
                             if (currentIdx > 0) { moveFocusTo(currentIdx - 1); true } else true
                         } else {
-                            if (currentIdx < lastIndex) { moveFocusTo(currentIdx + 1); true } else {
-                                onRightBoundary?.invoke()
-                                true
-                            }
+                            if (currentIdx < lastIndex) { moveFocusTo(currentIdx + 1); true } else true
                         }
                     }
                     else -> false

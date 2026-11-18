@@ -30,7 +30,8 @@ data class StreamScreenUiState(
     val addonStreams: List<AddonStreams> = emptyList(),
     val allStreams: List<Stream> = emptyList(),
     val selectedAddonFilter: String? = null, // null means "All"
-    val qualitySortEnabled: Boolean = true,
+    val selectedQualityFilter: StreamQualityTier? = null, // null means "All"
+    val availableQualityTiers: List<StreamQualityTier> = emptyList(),
     val filteredStreams: List<Stream> = emptyList(),
     val availableAddons: List<String> = emptyList(),
     val sourceChips: List<SourceChipItem> = emptyList(),
@@ -44,7 +45,7 @@ data class StreamScreenUiState(
 
 sealed class StreamScreenEvent {
     data class OnAddonFilterSelected(val addonName: String?) : StreamScreenEvent()
-    data object OnToggleQualitySort : StreamScreenEvent()
+    data class OnQualityFilterSelected(val tier: StreamQualityTier?) : StreamScreenEvent()
     data class OnStreamSelected(val stream: Stream) : StreamScreenEvent()
     data object OnAutoPlayConsumed : StreamScreenEvent()
     data object OnRefresh : StreamScreenEvent()

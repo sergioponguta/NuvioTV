@@ -1836,7 +1836,6 @@
     <string name="stream_player_internal">Internal</string>
     <string name="stream_player_external">External</string>
     <string name="stream_filter_all">All</string>
-    <string name="stream_sort_quality">Quality</string>
     <string name="stream_episode_label">S%1$d E%2$d</string>
 
     <string name="player_no_external_player">No external player found</string>
