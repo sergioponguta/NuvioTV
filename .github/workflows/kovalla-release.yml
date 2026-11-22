@@ -43,8 +43,12 @@ jobs:
           set -euo pipefail
 
           upstream=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name')
-          # gh prints the JSON error body to stdout on 404, so discard stdout when the call fails.
-          fork=$(gh api "repos/$FORK_REPO/releases/latest" --jq '.tag_name' 2>/dev/null) || fork=""
+          # El tag del fork puede ir por delante del upstream (1.1.2 sobre 1.1.0). Para saber si
+          # hay algo nuevo se compara el upstream con el que quedó anotado en la última release,
+          # no con el tag del fork.
+          fork_release=$(gh api "repos/$FORK_REPO/releases/latest" --jq '{tag: .tag_name, body: .body}' 2>/dev/null) || fork_release=""
+          fork=$(printf '%s' "$fork_release" | jq -r '.tag // empty' 2>/dev/null || true)
+          last_upstream=$(printf '%s' "$fork_release" | jq -r '.body // empty' 2>/dev/null | grep -oE 'NuvioTV [0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -n1 || true)
           if ! [[ "$upstream" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Could not read a stable tag from $UPSTREAM_REPO (got '$upstream')."
             exit 1
@@ -52,16 +56,20 @@ jobs:
           if ! [[ "$fork" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             fork=""
           fi
-          echo "upstream=$upstream fork=${fork:-<none>} force=${FORCE:-false}"
+          echo "upstream=$upstream fork=${fork:-<none>} last_upstream=${last_upstream:-<none>} force=${FORCE:-false}"
 
           # sort -V compares dotted numeric versions the same way semver does for these tags.
           newer_than() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ] && [ "$1" != "$2" ]; }
-
-          if [ -z "$fork" ] || newer_than "$upstream" "$fork"; then
-            tag="$upstream"
-          elif [ "${FORCE:-false}" = "true" ]; then
+          next_tag() {
+            local base
             base=$(printf '%s\n%s\n' "$upstream" "$fork" | sort -V | tail -n1)
-            tag=$(echo "$base" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
+            echo "$base" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}'
+          }
+
+          if [ -z "$fork" ]; then
+            tag="$upstream"
+          elif [ "${FORCE:-false}" = "true" ] || [ -z "$last_upstream" ] || newer_than "$upstream" "$last_upstream"; then
+            tag=$(next_tag)
           else
             echo "Upstream has no new stable release and force is off; nothing to do."
             echo "build=false" >> "$GITHUB_OUTPUT"
