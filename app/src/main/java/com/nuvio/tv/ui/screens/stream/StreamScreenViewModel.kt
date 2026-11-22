@@ -264,7 +264,8 @@ class StreamScreenViewModel @Inject constructor(
                         val filtered = applyStreamFilters(
                             updatedAllStreams,
                             state.selectedAddonFilter,
-                            state.selectedQualityFilter
+                            state.selectedQualityFilter,
+                            state.selectedCacheFilter
                         )
                         val fullFiltered = filtered.streams
                         streamFilterFullList = fullFiltered
@@ -276,6 +277,8 @@ class StreamScreenViewModel @Inject constructor(
                             allStreams = updatedAllStreams,
                             availableQualityTiers = filtered.qualityTiers,
                             selectedQualityFilter = filtered.qualityFilter,
+                            availableCacheTiers = filtered.cacheTiers,
+                            selectedCacheFilter = filtered.cacheFilter,
                             filteredStreams = if (pageEnd >= fullFiltered.size) fullFiltered
                                 else fullFiltered.subList(0, pageEnd)
                         )
@@ -352,6 +355,7 @@ class StreamScreenViewModel @Inject constructor(
                 }
             }
             is StreamScreenEvent.OnQualityFilterSelected -> filterByQuality(event.tier)
+            is StreamScreenEvent.OnCacheFilterSelected -> filterByCache(event.tier)
             StreamScreenEvent.OnRefresh -> {
                 streamQualityTierCache.clear()
                 updateUiStateIfChanged {
@@ -361,6 +365,8 @@ class StreamScreenViewModel @Inject constructor(
                         selectedAddonFilter = null,
                         selectedQualityFilter = null,
                         availableQualityTiers = emptyList(),
+                        selectedCacheFilter = null,
+                        availableCacheTiers = emptyList(),
                         filteredStreams = emptyList()
                     )
                 }
@@ -668,7 +674,8 @@ class StreamScreenViewModel @Inject constructor(
                 val filtered = applyStreamFilters(
                     allStreams,
                     _uiState.value.selectedAddonFilter,
-                    _uiState.value.selectedQualityFilter
+                    _uiState.value.selectedQualityFilter,
+                    _uiState.value.selectedCacheFilter
                 )
                 val fullFiltered = filtered.streams
                 streamFilterFullList = fullFiltered
@@ -688,6 +695,8 @@ class StreamScreenViewModel @Inject constructor(
                         filteredStreams = paginatedStreams,
                         availableQualityTiers = filtered.qualityTiers,
                         selectedQualityFilter = filtered.qualityFilter,
+                        availableCacheTiers = filtered.cacheTiers,
+                        selectedCacheFilter = filtered.cacheFilter,
                         availableAddons = availableAddons,
                         sourceChips = mergeSourceChipStatuses(
                             existing = _uiState.value.sourceChips,
@@ -781,7 +790,8 @@ class StreamScreenViewModel @Inject constructor(
                                 val filtered = applyStreamFilters(
                                     updatedAllStreams,
                                     state.selectedAddonFilter,
-                                    state.selectedQualityFilter
+                                    state.selectedQualityFilter,
+                                    state.selectedCacheFilter
                                 )
                                 val fullFiltered = filtered.streams
                                 streamFilterFullList = fullFiltered
@@ -793,6 +803,8 @@ class StreamScreenViewModel @Inject constructor(
                                     allStreams = updatedAllStreams,
                                     availableQualityTiers = filtered.qualityTiers,
                                     selectedQualityFilter = filtered.qualityFilter,
+                                    availableCacheTiers = filtered.cacheTiers,
+                                    selectedCacheFilter = filtered.cacheFilter,
                                     filteredStreams = if (pageEnd >= fullFiltered.size) fullFiltered
                                         else fullFiltered.subList(0, pageEnd)
                                 )
@@ -1285,12 +1297,19 @@ class StreamScreenViewModel @Inject constructor(
             if (state.selectedAddonFilter == addonName) {
                 return@updateUiStateIfChanged state
             }
-            val filtered = applyStreamFilters(state.allStreams, addonName, state.selectedQualityFilter)
+            val filtered = applyStreamFilters(
+                state.allStreams,
+                addonName,
+                state.selectedQualityFilter,
+                state.selectedCacheFilter
+            )
             val paginatedStreams = firstPage(filtered.streams)
             state.copy(
                 selectedAddonFilter = addonName,
                 availableQualityTiers = filtered.qualityTiers,
                 selectedQualityFilter = filtered.qualityFilter,
+                availableCacheTiers = filtered.cacheTiers,
+                selectedCacheFilter = filtered.cacheFilter,
                 filteredStreams = paginatedStreams
             )
         }
@@ -1302,10 +1321,39 @@ class StreamScreenViewModel @Inject constructor(
             if (state.selectedQualityFilter == tier) {
                 return@updateUiStateIfChanged state
             }
-            val filtered = applyStreamFilters(state.allStreams, state.selectedAddonFilter, tier)
+            val filtered = applyStreamFilters(
+                state.allStreams,
+                state.selectedAddonFilter,
+                tier,
+                state.selectedCacheFilter
+            )
             state.copy(
                 availableQualityTiers = filtered.qualityTiers,
                 selectedQualityFilter = filtered.qualityFilter,
+                availableCacheTiers = filtered.cacheTiers,
+                selectedCacheFilter = filtered.cacheFilter,
+                filteredStreams = firstPage(filtered.streams)
+            )
+        }
+    }
+
+    private fun filterByCache(tier: StreamCacheTier?) {
+        streamFilterExpandJob?.cancel()
+        updateUiStateIfChanged { state ->
+            if (state.selectedCacheFilter == tier) {
+                return@updateUiStateIfChanged state
+            }
+            val filtered = applyStreamFilters(
+                state.allStreams,
+                state.selectedAddonFilter,
+                state.selectedQualityFilter,
+                tier
+            )
+            state.copy(
+                availableQualityTiers = filtered.qualityTiers,
+                selectedQualityFilter = filtered.qualityFilter,
+                availableCacheTiers = filtered.cacheTiers,
+                selectedCacheFilter = filtered.cacheFilter,
                 filteredStreams = firstPage(filtered.streams)
             )
         }
@@ -1317,31 +1365,51 @@ class StreamScreenViewModel @Inject constructor(
     private class StreamFilterResult(
         val streams: List<Stream>,
         val qualityTiers: List<StreamQualityTier>,
-        val qualityFilter: StreamQualityTier?
+        val qualityFilter: StreamQualityTier?,
+        val cacheTiers: List<StreamCacheTier>,
+        val cacheFilter: StreamCacheTier?
     )
 
     /**
-     * Addon filter first, then the quality chips of what is left. A quality that is
-     * not available for the current addon (or when only one quality exists) falls
-     * back to "All" instead of leaving an empty list behind a hidden row.
+     * Addon filter first, then the quality and cache chips of what is left.
+     *
+     * The options of each row are computed against the other active filter, so a
+     * row never offers a choice that would empty the list. A filter that is no
+     * longer available (switched addon, only one value left) falls back to "All"
+     * instead of staying active behind a hidden row.
      */
     private fun applyStreamFilters(
         allStreams: List<Stream>,
         addonFilter: String?,
-        qualityFilter: StreamQualityTier?
+        qualityFilter: StreamQualityTier?,
+        cacheFilter: StreamCacheTier?
     ): StreamFilterResult {
         val byAddon = if (addonFilter == null) {
             allStreams
         } else {
             allStreams.filter { it.addonName == addonFilter }
         }
-        val tiers = availableQualityTiers(byAddon, ::cachedStreamQualityTier)
-        val quality = qualityFilter?.takeIf { it in tiers }
+        val qualityForOptions = qualityFilter?.takeIf {
+            it in availableQualityTiers(byAddon, ::cachedStreamQualityTier)
+        }
+        val cacheForOptions = cacheFilter?.takeIf { it in availableCacheTiers(byAddon) }
+        val cacheTiers = availableCacheTiers(
+            filterStreamsByQuality(byAddon, qualityForOptions, ::cachedStreamQualityTier)
+        )
+        val qualityTiers = availableQualityTiers(
+            filterStreamsByCache(byAddon, cacheForOptions),
+            ::cachedStreamQualityTier
+        )
+        val quality = qualityFilter?.takeIf { it in qualityTiers }
+        val cache = cacheFilter?.takeIf { it in cacheTiers }
         val full = groupStreamsByProvider(
-            filterStreamsByQuality(byAddon, quality, ::cachedStreamQualityTier)
+            filterStreamsByCache(
+                filterStreamsByQuality(byAddon, quality, ::cachedStreamQualityTier),
+                cache
+            )
         )
         streamFilterFullList = full
-        return StreamFilterResult(full, tiers, quality)
+        return StreamFilterResult(full, qualityTiers, quality, cacheTiers, cache)
     }
 
     private fun firstPage(full: List<Stream>): List<Stream> =

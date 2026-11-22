@@ -96,7 +96,6 @@ import com.nuvio.tv.core.streams.StreamBadgePlacement
 import com.nuvio.tv.core.streams.StreamBadgeSettings
 import com.nuvio.tv.data.local.PlayerPreference
 import com.nuvio.tv.domain.model.Stream
-import com.nuvio.tv.ui.components.SourceStatusFilterChip
 import com.nuvio.tv.ui.components.SourceChipItem
 import com.nuvio.tv.ui.components.SourceChipStatus
 import com.nuvio.tv.ui.components.P2pConsentDialog
@@ -475,6 +474,9 @@ fun StreamScreen(
                     selectedQualityFilter = uiState.selectedQualityFilter,
                     availableQualityTiers = uiState.availableQualityTiers,
                     onQualityFilterSelected = { viewModel.onEvent(StreamScreenEvent.OnQualityFilterSelected(it)) },
+                    selectedCacheFilter = uiState.selectedCacheFilter,
+                    availableCacheTiers = uiState.availableCacheTiers,
+                    onCacheFilterSelected = { viewModel.onEvent(StreamScreenEvent.OnCacheFilterSelected(it)) },
                     showFileSizeBadges = streamBadgeSettings.showFileSizeBadges,
                     showAddonLogo = streamBadgeSettings.showAddonLogo,
                     badgePlacement = streamBadgeSettings.badgePlacement,
@@ -775,6 +777,9 @@ private fun RightStreamSection(
     selectedQualityFilter: StreamQualityTier?,
     availableQualityTiers: List<StreamQualityTier>,
     onQualityFilterSelected: (StreamQualityTier?) -> Unit,
+    selectedCacheFilter: StreamCacheTier?,
+    availableCacheTiers: List<StreamCacheTier>,
+    onCacheFilterSelected: (StreamCacheTier?) -> Unit,
     showFileSizeBadges: Boolean,
     showAddonLogo: Boolean,
     badgePlacement: StreamBadgePlacement,
@@ -826,10 +831,17 @@ private fun RightStreamSection(
     val chipListState = rememberLazyListState()
     val qualityOptions = remember(availableQualityTiers) { listOf<StreamQualityTier?>(null) + availableQualityTiers }
     val qualityFocusRequesters = remember(qualityOptions) { List(qualityOptions.size) { FocusRequester() } }
+    val cacheOptions = remember(availableCacheTiers) { listOf<StreamCacheTier?>(null) + availableCacheTiers }
+    val cacheFocusRequesters = remember(cacheOptions) { List(cacheOptions.size) { FocusRequester() } }
     fun requestQualityFocus() {
         userMovedFromFirstResult = true
         val idx = qualityOptions.indexOf(selectedQualityFilter).coerceAtLeast(0)
         runCatching { qualityFocusRequesters[idx].requestFocus() }
+    }
+    fun requestCacheFocus() {
+        userMovedFromFirstResult = true
+        val idx = cacheOptions.indexOf(selectedCacheFilter).coerceAtLeast(0)
+        runCatching { cacheFocusRequesters[idx].requestFocus() }
     }
     fun onAddonFilterSelectedGuarded(addon: String?) {
         userMovedFromFirstResult = true
@@ -966,10 +978,17 @@ private fun RightStreamSection(
                             externalOrderedNames = orderedAddonNames,
                             chipListState = chipListState,
                             onDownKey = {
-                                if (availableQualityTiers.isNotEmpty()) {
-                                    requestQualityFocus()
-                                    true
-                                } else false
+                                when {
+                                    availableQualityTiers.isNotEmpty() -> {
+                                        requestQualityFocus()
+                                        true
+                                    }
+                                    availableCacheTiers.isNotEmpty() -> {
+                                        requestCacheFocus()
+                                        true
+                                    }
+                                    else -> false
+                                }
                             },
                             debugTag = "StreamScreen"
                         )
@@ -995,6 +1014,40 @@ private fun RightStreamSection(
                                 if (selectedAddonFilter == null) 1
                                 else orderedAddonNames.indexOf(selectedAddonFilter) + 2
                             )
+                        },
+                        onDownKey = {
+                            if (availableCacheTiers.isNotEmpty()) {
+                                requestCacheFocus()
+                                true
+                            } else false
+                        }
+                    )
+                }
+
+                // Cache chips: keep only sources that play right away or only
+                // the ones that still need a torrent download/resolve.
+                AnimatedVisibility(
+                    visible = availableCacheTiers.isNotEmpty(),
+                    enter = fadeIn(animationSpec = tween(300)) + expandVertically(animationSpec = tween(300)),
+                    exit = fadeOut(animationSpec = tween(300)) + shrinkVertically(animationSpec = tween(300))
+                ) {
+                    CacheFilterChips(
+                        tiers = availableCacheTiers,
+                        selectedTier = selectedCacheFilter,
+                        focusRequesters = cacheFocusRequesters,
+                        onTierSelected = {
+                            userMovedFromFirstResult = true
+                            onCacheFilterSelected(it)
+                        },
+                        onUpKey = {
+                            if (availableQualityTiers.isNotEmpty()) {
+                                requestQualityFocus()
+                            } else {
+                                requestChipFocus(
+                                    if (selectedAddonFilter == null) 1
+                                    else orderedAddonNames.indexOf(selectedAddonFilter) + 2
+                                )
+                            }
                         }
                     )
                 }
@@ -1039,8 +1092,11 @@ private fun RightStreamSection(
                                 onAddonFilterSelected = { onAddonFilterSelectedGuarded(it) },
                                 orderedAddonNames = orderedAddonNames,
                                 onRequestChipFocus = { idx ->
-                                    if (availableQualityTiers.isNotEmpty()) requestQualityFocus()
-                                    else requestChipFocus(idx)
+                                    when {
+                                        availableCacheTiers.isNotEmpty() -> requestCacheFocus()
+                                        availableQualityTiers.isNotEmpty() -> requestQualityFocus()
+                                        else -> requestChipFocus(idx)
+                                    }
                                 },
                                 onUserNavigatedFromFirstResult = {
                                     userMovedFromFirstResult = true
@@ -1715,7 +1771,8 @@ private fun QualityFilterChips(
     selectedTier: StreamQualityTier?,
     focusRequesters: List<FocusRequester>,
     onTierSelected: (StreamQualityTier?) -> Unit,
-    onUpKey: () -> Unit
+    onUpKey: () -> Unit,
+    onDownKey: () -> Boolean
 ) {
     val isRtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
     val options = remember(tiers) { listOf<StreamQualityTier?>(null) + tiers }
@@ -1728,7 +1785,57 @@ private fun QualityFilterChips(
     }
     Row(
         modifier = Modifier
-            .height(NuvioTheme.spacing.huge)
+            .height(NuvioTheme.spacing.xxl)
+            .padding(horizontal = NuvioTheme.spacing.sm)
+            .onKeyEvent { event ->
+                if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
+                when (event.key) {
+                    Key.DirectionUp -> { onUpKey(); true }
+                    Key.DirectionDown -> onDownKey()
+                    Key.DirectionLeft -> { moveTo(focusedIndex + if (isRtl) 1 else -1); true }
+                    Key.DirectionRight -> { moveTo(focusedIndex + if (isRtl) -1 else 1); true }
+                    else -> false
+                }
+            },
+        horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.xs),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        options.forEachIndexed { index, tier ->
+            CompactFilterChip(
+                label = when (tier) {
+                    null -> stringResource(R.string.stream_filter_all)
+                    StreamQualityTier.UNKNOWN -> stringResource(R.string.stream_quality_unknown)
+                    else -> tier.label
+                },
+                selected = tier == selectedTier,
+                onClick = { onTierSelected(tier) },
+                modifier = Modifier
+                    .then(focusRequesters.getOrNull(index)?.let { Modifier.focusRequester(it) } ?: Modifier)
+                    .onFocusChanged { if (it.isFocused) focusedIndex = index }
+            )
+        }
+    }
+}
+
+@Composable
+private fun CacheFilterChips(
+    tiers: List<StreamCacheTier>,
+    selectedTier: StreamCacheTier?,
+    focusRequesters: List<FocusRequester>,
+    onTierSelected: (StreamCacheTier?) -> Unit,
+    onUpKey: () -> Unit
+) {
+    val isRtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
+    val options = remember(tiers) { listOf<StreamCacheTier?>(null) + tiers }
+    var focusedIndex by remember { mutableStateOf(0) }
+    fun moveTo(target: Int) {
+        if (target !in options.indices) return
+        onTierSelected(options[target])
+        runCatching { focusRequesters.getOrNull(target)?.requestFocus() }
+    }
+    Row(
+        modifier = Modifier
+            .height(NuvioTheme.spacing.xxl)
             .padding(horizontal = NuvioTheme.spacing.sm)
             .onKeyEvent { event ->
                 if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
@@ -1739,22 +1846,78 @@ private fun QualityFilterChips(
                     else -> false
                 }
             },
-        horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm),
+        horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.xs),
         verticalAlignment = Alignment.CenterVertically
     ) {
         options.forEachIndexed { index, tier ->
-            SourceStatusFilterChip(
-                name = when (tier) {
+            CompactFilterChip(
+                label = when (tier) {
                     null -> stringResource(R.string.stream_filter_all)
-                    StreamQualityTier.UNKNOWN -> stringResource(R.string.stream_quality_unknown)
-                    else -> tier.label
+                    StreamCacheTier.CACHED -> stringResource(R.string.stream_cache_cached)
+                    StreamCacheTier.DIRECT -> stringResource(R.string.stream_cache_direct)
+                    StreamCacheTier.NOT_CACHED -> stringResource(R.string.stream_cache_not_cached)
                 },
-                isSelected = tier == selectedTier,
+                selected = tier == selectedTier,
                 onClick = { onTierSelected(tier) },
                 modifier = Modifier
                     .then(focusRequesters.getOrNull(index)?.let { Modifier.focusRequester(it) } ?: Modifier)
                     .onFocusChanged { if (it.isFocused) focusedIndex = index }
             )
         }
+    }
+}
+
+/**
+ * Dense chip for the secondary filter rows: the TV FilterChip has a fixed
+ * 32 dp container and wide internal padding, which made these rows taller than
+ * the addon chips and wasted vertical space.
+ */
+@Composable
+private fun CompactFilterChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(20.dp)
+    val contentColor = if (focused || selected) {
+        NuvioTheme.colors.OnSecondary
+    } else {
+        NuvioTheme.colors.TextSecondary
+    }
+    Card(
+        onClick = onClick,
+        modifier = modifier.onFocusChanged { focused = it.isFocused },
+        colors = CardDefaults.colors(
+            containerColor = if (selected) NuvioTheme.colors.Secondary else NuvioTheme.colors.BackgroundCard,
+            focusedContainerColor = NuvioTheme.colors.Secondary
+        ),
+        border = CardDefaults.border(
+            border = Border(
+                border = BorderStroke(
+                    NuvioTheme.spacing.hairline,
+                    if (selected) NuvioTheme.colors.Primary else NuvioTheme.colors.Border
+                ),
+                shape = shape
+            ),
+            focusedBorder = Border(
+                border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
+                shape = shape
+            )
+        ),
+        shape = CardDefaults.shape(shape = shape),
+        scale = CardDefaults.scale(focusedScale = 1.05f)
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(
+                horizontal = NuvioTheme.spacing.md,
+                vertical = NuvioTheme.spacing.xs
+            ),
+            style = MaterialTheme.typography.labelMedium,
+            color = contentColor,
+            maxLines = 1
+        )
     }
 }
