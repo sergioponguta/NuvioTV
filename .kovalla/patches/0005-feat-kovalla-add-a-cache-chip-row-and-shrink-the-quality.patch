@@ -1,0 +1,885 @@
+From 3999ee3b097df375555a404c9c29cf076c688af7 Mon Sep 17 00:00:00 2001
+From: Sergio Ponguta <sergioponguta@gmail.com>
+Date: Sun, 22 Nov 2026 13:06:56 -0500
+Subject: [PATCH] feat(kovalla): add a cache chip row and shrink the quality
+ chips
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Third row under the addon chips (All, Cached, Direct, Not cached) filters the list by how the source plays.
+- Cached = debrid cache hit; Direct = direct playback with no cache label, such as MoviePlus; Not cached = torrent that needs a download/resolve.
+- Reads the cache markers addons put in the visible text ([TB ⚡]/[TB ⏳], ⚡Ready/❌ Not Ready) because direct addons do not fill the structured debrid fields.
+- Options of the quality row and the cache row are computed against each other, so a choice never empties the list; a filter that stops being available falls back to All.
+- Down from the addon chips reaches quality, then cache; up from the list lands on the nearest visible row.
+- Quality and cache chips use a compact 24 dp chip instead of the 32 dp TV FilterChip, with tighter spacing and a 32 dp row instead of 56 dp.
+- Unit coverage for the cache buckets, the text markers and the quality filter.
+---
+ .../tv/ui/screens/stream/StreamCacheFilter.kt |  81 +++++++
+ .../tv/ui/screens/stream/StreamScreen.kt      | 189 ++++++++++++++--
+ .../ui/screens/stream/StreamScreenUiState.kt  |   3 +
+ .../screens/stream/StreamScreenViewModel.kt   |  96 ++++++--
+ app/src/main/res/values-b+es+419/strings.xml  |   3 +
+ app/src/main/res/values-es/strings.xml        |   3 +
+ app/src/main/res/values/strings.xml           |   3 +
+ .../screens/stream/StreamCacheFilterTest.kt   | 214 ++++++++++++++++++
+ 8 files changed, 565 insertions(+), 27 deletions(-)
+ create mode 100644 app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamCacheFilter.kt
+ create mode 100644 app/src/test/java/com/nuvio/tv/ui/screens/stream/StreamCacheFilterTest.kt
+
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamCacheFilter.kt b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamCacheFilter.kt
+new file mode 100644
+index 000000000..b0b02cb14
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamCacheFilter.kt
+@@ -0,0 +1,81 @@
++package com.nuvio.tv.ui.screens.stream
++
++import com.nuvio.tv.domain.model.Stream
++import com.nuvio.tv.domain.model.StreamDebridCacheState
++
++/**
++ * Cache buckets of the cache chip row.
++ *
++ * CACHED is a debrid cache hit: a direct debrid link, a torrent the local
++ * availability check marked CACHED, or an addon stream that labels itself
++ * cached. DIRECT is plain direct playback with no cache label (HTTP/HLS links,
++ * external pages, YouTube): addons such as MoviePlus have nothing to cache.
++ * NOT_CACHED is anything that has to be downloaded/resolved first.
++ */
++enum class StreamCacheTier {
++    CACHED,
++    DIRECT,
++    NOT_CACHED
++}
++
++// Addons label their streams in the visible text instead of the structured
++// fields: Latinobrid uses "[TB ⚡]" / "[TB ⏳]" in the name and AIOStreams uses
++// "⚡Ready (TB)" / "❌ Not Ready (TB)" in the description.
++private val cachedTextMarkers = listOf(
++    "⚡",
++    "cached",
++    "cacheado",
++    "instant",
++    "instantáneo",
++    "instantaneo",
++    "en caché",
++    "en cache"
++)
++private val uncachedTextMarkers = listOf(
++    "⏳",
++    "not ready",
++    "uncached",
++    "not cached",
++    "no cacheado",
++    "sin caché",
++    "sin cache"
++)
++
++internal fun streamCacheTier(stream: Stream): StreamCacheTier {
++    when (stream.debridCacheStatus?.state) {
++        StreamDebridCacheState.CACHED -> return StreamCacheTier.CACHED
++        StreamDebridCacheState.NOT_CACHED -> return StreamCacheTier.NOT_CACHED
++        else -> Unit
++    }
++    if (stream.isDirectDebrid()) return StreamCacheTier.CACHED
++    // A torrent without a direct URL must be resolved before it can play, no
++    // matter what its label says.
++    if (stream.needsLocalDebridResolve()) return StreamCacheTier.NOT_CACHED
++
++    val text = listOfNotNull(stream.name, stream.title, stream.description)
++        .joinToString("\n")
++        .lowercase()
++    if (uncachedTextMarkers.any(text::contains)) return StreamCacheTier.NOT_CACHED
++    if (cachedTextMarkers.any(text::contains)) return StreamCacheTier.CACHED
++    return StreamCacheTier.DIRECT
++}
++
++/**
++ * Tiers present in [streams], cached first. Fewer than two means there is
++ * nothing to choose between, so the chip row stays hidden (empty list).
++ */
++internal fun availableCacheTiers(
++    streams: List<Stream>,
++    tierOf: (Stream) -> StreamCacheTier = ::streamCacheTier
++): List<StreamCacheTier> {
++    val present = streams.mapTo(HashSet<StreamCacheTier>(), tierOf)
++    if (present.size < 2) return emptyList()
++    return StreamCacheTier.entries.filter { it in present }
++}
++
++/** Keeps the original (addon/provider) order; null tier means no filtering. */
++internal fun filterStreamsByCache(
++    streams: List<Stream>,
++    tier: StreamCacheTier?,
++    tierOf: (Stream) -> StreamCacheTier = ::streamCacheTier
++): List<Stream> = if (tier == null) streams else streams.filter { tierOf(it) == tier }
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreen.kt b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreen.kt
+index 68930de31..fea91168d 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreen.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreen.kt
+@@ -96,7 +96,6 @@ import com.nuvio.tv.core.streams.StreamBadgePlacement
+ import com.nuvio.tv.core.streams.StreamBadgeSettings
+ import com.nuvio.tv.data.local.PlayerPreference
+ import com.nuvio.tv.domain.model.Stream
+-import com.nuvio.tv.ui.components.SourceStatusFilterChip
+ import com.nuvio.tv.ui.components.SourceChipItem
+ import com.nuvio.tv.ui.components.SourceChipStatus
+ import com.nuvio.tv.ui.components.P2pConsentDialog
+@@ -475,6 +474,9 @@ fun StreamScreen(
+                     selectedQualityFilter = uiState.selectedQualityFilter,
+                     availableQualityTiers = uiState.availableQualityTiers,
+                     onQualityFilterSelected = { viewModel.onEvent(StreamScreenEvent.OnQualityFilterSelected(it)) },
++                    selectedCacheFilter = uiState.selectedCacheFilter,
++                    availableCacheTiers = uiState.availableCacheTiers,
++                    onCacheFilterSelected = { viewModel.onEvent(StreamScreenEvent.OnCacheFilterSelected(it)) },
+                     showFileSizeBadges = streamBadgeSettings.showFileSizeBadges,
+                     showAddonLogo = streamBadgeSettings.showAddonLogo,
+                     badgePlacement = streamBadgeSettings.badgePlacement,
+@@ -775,6 +777,9 @@ private fun RightStreamSection(
+     selectedQualityFilter: StreamQualityTier?,
+     availableQualityTiers: List<StreamQualityTier>,
+     onQualityFilterSelected: (StreamQualityTier?) -> Unit,
++    selectedCacheFilter: StreamCacheTier?,
++    availableCacheTiers: List<StreamCacheTier>,
++    onCacheFilterSelected: (StreamCacheTier?) -> Unit,
+     showFileSizeBadges: Boolean,
+     showAddonLogo: Boolean,
+     badgePlacement: StreamBadgePlacement,
+@@ -826,11 +831,18 @@ private fun RightStreamSection(
+     val chipListState = rememberLazyListState()
+     val qualityOptions = remember(availableQualityTiers) { listOf<StreamQualityTier?>(null) + availableQualityTiers }
+     val qualityFocusRequesters = remember(qualityOptions) { List(qualityOptions.size) { FocusRequester() } }
++    val cacheOptions = remember(availableCacheTiers) { listOf<StreamCacheTier?>(null) + availableCacheTiers }
++    val cacheFocusRequesters = remember(cacheOptions) { List(cacheOptions.size) { FocusRequester() } }
+     fun requestQualityFocus() {
+         userMovedFromFirstResult = true
+         val idx = qualityOptions.indexOf(selectedQualityFilter).coerceAtLeast(0)
+         runCatching { qualityFocusRequesters[idx].requestFocus() }
+     }
++    fun requestCacheFocus() {
++        userMovedFromFirstResult = true
++        val idx = cacheOptions.indexOf(selectedCacheFilter).coerceAtLeast(0)
++        runCatching { cacheFocusRequesters[idx].requestFocus() }
++    }
+     fun onAddonFilterSelectedGuarded(addon: String?) {
+         userMovedFromFirstResult = true
+         val targetRequester = if (addon == null) {
+@@ -966,10 +978,17 @@ private fun RightStreamSection(
+                             externalOrderedNames = orderedAddonNames,
+                             chipListState = chipListState,
+                             onDownKey = {
+-                                if (availableQualityTiers.isNotEmpty()) {
+-                                    requestQualityFocus()
+-                                    true
+-                                } else false
++                                when {
++                                    availableQualityTiers.isNotEmpty() -> {
++                                        requestQualityFocus()
++                                        true
++                                    }
++                                    availableCacheTiers.isNotEmpty() -> {
++                                        requestCacheFocus()
++                                        true
++                                    }
++                                    else -> false
++                                }
+                             },
+                             debugTag = "StreamScreen"
+                         )
+@@ -995,6 +1014,40 @@ private fun RightStreamSection(
+                                 if (selectedAddonFilter == null) 1
+                                 else orderedAddonNames.indexOf(selectedAddonFilter) + 2
+                             )
++                        },
++                        onDownKey = {
++                            if (availableCacheTiers.isNotEmpty()) {
++                                requestCacheFocus()
++                                true
++                            } else false
++                        }
++                    )
++                }
++
++                // Cache chips: keep only sources that play right away or only
++                // the ones that still need a torrent download/resolve.
++                AnimatedVisibility(
++                    visible = availableCacheTiers.isNotEmpty(),
++                    enter = fadeIn(animationSpec = tween(300)) + expandVertically(animationSpec = tween(300)),
++                    exit = fadeOut(animationSpec = tween(300)) + shrinkVertically(animationSpec = tween(300))
++                ) {
++                    CacheFilterChips(
++                        tiers = availableCacheTiers,
++                        selectedTier = selectedCacheFilter,
++                        focusRequesters = cacheFocusRequesters,
++                        onTierSelected = {
++                            userMovedFromFirstResult = true
++                            onCacheFilterSelected(it)
++                        },
++                        onUpKey = {
++                            if (availableQualityTiers.isNotEmpty()) {
++                                requestQualityFocus()
++                            } else {
++                                requestChipFocus(
++                                    if (selectedAddonFilter == null) 1
++                                    else orderedAddonNames.indexOf(selectedAddonFilter) + 2
++                                )
++                            }
+                         }
+                     )
+                 }
+@@ -1039,8 +1092,11 @@ private fun RightStreamSection(
+                                 onAddonFilterSelected = { onAddonFilterSelectedGuarded(it) },
+                                 orderedAddonNames = orderedAddonNames,
+                                 onRequestChipFocus = { idx ->
+-                                    if (availableQualityTiers.isNotEmpty()) requestQualityFocus()
+-                                    else requestChipFocus(idx)
++                                    when {
++                                        availableCacheTiers.isNotEmpty() -> requestCacheFocus()
++                                        availableQualityTiers.isNotEmpty() -> requestQualityFocus()
++                                        else -> requestChipFocus(idx)
++                                    }
+                                 },
+                                 onUserNavigatedFromFirstResult = {
+                                     userMovedFromFirstResult = true
+@@ -1715,7 +1771,8 @@ private fun QualityFilterChips(
+     selectedTier: StreamQualityTier?,
+     focusRequesters: List<FocusRequester>,
+     onTierSelected: (StreamQualityTier?) -> Unit,
+-    onUpKey: () -> Unit
++    onUpKey: () -> Unit,
++    onDownKey: () -> Boolean
+ ) {
+     val isRtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
+     val options = remember(tiers) { listOf<StreamQualityTier?>(null) + tiers }
+@@ -1728,28 +1785,29 @@ private fun QualityFilterChips(
+     }
+     Row(
+         modifier = Modifier
+-            .height(NuvioTheme.spacing.huge)
++            .height(NuvioTheme.spacing.xxl)
+             .padding(horizontal = NuvioTheme.spacing.sm)
+             .onKeyEvent { event ->
+                 if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
+                 when (event.key) {
+                     Key.DirectionUp -> { onUpKey(); true }
++                    Key.DirectionDown -> onDownKey()
+                     Key.DirectionLeft -> { moveTo(focusedIndex + if (isRtl) 1 else -1); true }
+                     Key.DirectionRight -> { moveTo(focusedIndex + if (isRtl) -1 else 1); true }
+                     else -> false
+                 }
+             },
+-        horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm),
++        horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.xs),
+         verticalAlignment = Alignment.CenterVertically
+     ) {
+         options.forEachIndexed { index, tier ->
+-            SourceStatusFilterChip(
+-                name = when (tier) {
++            CompactFilterChip(
++                label = when (tier) {
+                     null -> stringResource(R.string.stream_filter_all)
+                     StreamQualityTier.UNKNOWN -> stringResource(R.string.stream_quality_unknown)
+                     else -> tier.label
+                 },
+-                isSelected = tier == selectedTier,
++                selected = tier == selectedTier,
+                 onClick = { onTierSelected(tier) },
+                 modifier = Modifier
+                     .then(focusRequesters.getOrNull(index)?.let { Modifier.focusRequester(it) } ?: Modifier)
+@@ -1758,3 +1816,108 @@ private fun QualityFilterChips(
+         }
+     }
+ }
++
++@Composable
++private fun CacheFilterChips(
++    tiers: List<StreamCacheTier>,
++    selectedTier: StreamCacheTier?,
++    focusRequesters: List<FocusRequester>,
++    onTierSelected: (StreamCacheTier?) -> Unit,
++    onUpKey: () -> Unit
++) {
++    val isRtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
++    val options = remember(tiers) { listOf<StreamCacheTier?>(null) + tiers }
++    var focusedIndex by remember { mutableStateOf(0) }
++    fun moveTo(target: Int) {
++        if (target !in options.indices) return
++        onTierSelected(options[target])
++        runCatching { focusRequesters.getOrNull(target)?.requestFocus() }
++    }
++    Row(
++        modifier = Modifier
++            .height(NuvioTheme.spacing.xxl)
++            .padding(horizontal = NuvioTheme.spacing.sm)
++            .onKeyEvent { event ->
++                if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
++                when (event.key) {
++                    Key.DirectionUp -> { onUpKey(); true }
++                    Key.DirectionLeft -> { moveTo(focusedIndex + if (isRtl) 1 else -1); true }
++                    Key.DirectionRight -> { moveTo(focusedIndex + if (isRtl) -1 else 1); true }
++                    else -> false
++                }
++            },
++        horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.xs),
++        verticalAlignment = Alignment.CenterVertically
++    ) {
++        options.forEachIndexed { index, tier ->
++            CompactFilterChip(
++                label = when (tier) {
++                    null -> stringResource(R.string.stream_filter_all)
++                    StreamCacheTier.CACHED -> stringResource(R.string.stream_cache_cached)
++                    StreamCacheTier.DIRECT -> stringResource(R.string.stream_cache_direct)
++                    StreamCacheTier.NOT_CACHED -> stringResource(R.string.stream_cache_not_cached)
++                },
++                selected = tier == selectedTier,
++                onClick = { onTierSelected(tier) },
++                modifier = Modifier
++                    .then(focusRequesters.getOrNull(index)?.let { Modifier.focusRequester(it) } ?: Modifier)
++                    .onFocusChanged { if (it.isFocused) focusedIndex = index }
++            )
++        }
++    }
++}
++
++/**
++ * Dense chip for the secondary filter rows: the TV FilterChip has a fixed
++ * 32 dp container and wide internal padding, which made these rows taller than
++ * the addon chips and wasted vertical space.
++ */
++@Composable
++private fun CompactFilterChip(
++    label: String,
++    selected: Boolean,
++    onClick: () -> Unit,
++    modifier: Modifier = Modifier
++) {
++    var focused by remember { mutableStateOf(false) }
++    val shape = RoundedCornerShape(20.dp)
++    val contentColor = if (focused || selected) {
++        NuvioTheme.colors.OnSecondary
++    } else {
++        NuvioTheme.colors.TextSecondary
++    }
++    Card(
++        onClick = onClick,
++        modifier = modifier.onFocusChanged { focused = it.isFocused },
++        colors = CardDefaults.colors(
++            containerColor = if (selected) NuvioTheme.colors.Secondary else NuvioTheme.colors.BackgroundCard,
++            focusedContainerColor = NuvioTheme.colors.Secondary
++        ),
++        border = CardDefaults.border(
++            border = Border(
++                border = BorderStroke(
++                    NuvioTheme.spacing.hairline,
++                    if (selected) NuvioTheme.colors.Primary else NuvioTheme.colors.Border
++                ),
++                shape = shape
++            ),
++            focusedBorder = Border(
++                border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
++                shape = shape
++            )
++        ),
++        shape = CardDefaults.shape(shape = shape),
++        scale = CardDefaults.scale(focusedScale = 1.05f)
++    ) {
++        Text(
++            text = label,
++            modifier = Modifier.padding(
++                horizontal = NuvioTheme.spacing.md,
++                vertical = NuvioTheme.spacing.xs
++            ),
++            style = MaterialTheme.typography.labelMedium,
++            color = contentColor,
++            maxLines = 1
++        )
++    }
++}
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenUiState.kt b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenUiState.kt
+index 304316f5d..31ab4e229 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenUiState.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenUiState.kt
+@@ -32,6 +32,8 @@ data class StreamScreenUiState(
+     val selectedAddonFilter: String? = null, // null means "All"
+     val selectedQualityFilter: StreamQualityTier? = null, // null means "All"
+     val availableQualityTiers: List<StreamQualityTier> = emptyList(),
++    val selectedCacheFilter: StreamCacheTier? = null, // null means "All"
++    val availableCacheTiers: List<StreamCacheTier> = emptyList(),
+     val filteredStreams: List<Stream> = emptyList(),
+     val availableAddons: List<String> = emptyList(),
+     val sourceChips: List<SourceChipItem> = emptyList(),
+@@ -46,6 +48,7 @@ data class StreamScreenUiState(
+ sealed class StreamScreenEvent {
+     data class OnAddonFilterSelected(val addonName: String?) : StreamScreenEvent()
+     data class OnQualityFilterSelected(val tier: StreamQualityTier?) : StreamScreenEvent()
++    data class OnCacheFilterSelected(val tier: StreamCacheTier?) : StreamScreenEvent()
+     data class OnStreamSelected(val stream: Stream) : StreamScreenEvent()
+     data object OnAutoPlayConsumed : StreamScreenEvent()
+     data object OnRefresh : StreamScreenEvent()
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt
+index 0299a658a..6ce0b99f8 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt
+@@ -264,7 +264,8 @@ class StreamScreenViewModel @Inject constructor(
+                         val filtered = applyStreamFilters(
+                             updatedAllStreams,
+                             state.selectedAddonFilter,
+-                            state.selectedQualityFilter
++                            state.selectedQualityFilter,
++                            state.selectedCacheFilter
+                         )
+                         val fullFiltered = filtered.streams
+                         streamFilterFullList = fullFiltered
+@@ -276,6 +277,8 @@ class StreamScreenViewModel @Inject constructor(
+                             allStreams = updatedAllStreams,
+                             availableQualityTiers = filtered.qualityTiers,
+                             selectedQualityFilter = filtered.qualityFilter,
++                            availableCacheTiers = filtered.cacheTiers,
++                            selectedCacheFilter = filtered.cacheFilter,
+                             filteredStreams = if (pageEnd >= fullFiltered.size) fullFiltered
+                                 else fullFiltered.subList(0, pageEnd)
+                         )
+@@ -352,6 +355,7 @@ class StreamScreenViewModel @Inject constructor(
+                 }
+             }
+             is StreamScreenEvent.OnQualityFilterSelected -> filterByQuality(event.tier)
++            is StreamScreenEvent.OnCacheFilterSelected -> filterByCache(event.tier)
+             StreamScreenEvent.OnRefresh -> {
+                 streamQualityTierCache.clear()
+                 updateUiStateIfChanged {
+@@ -361,6 +365,8 @@ class StreamScreenViewModel @Inject constructor(
+                         selectedAddonFilter = null,
+                         selectedQualityFilter = null,
+                         availableQualityTiers = emptyList(),
++                        selectedCacheFilter = null,
++                        availableCacheTiers = emptyList(),
+                         filteredStreams = emptyList()
+                     )
+                 }
+@@ -668,7 +674,8 @@ class StreamScreenViewModel @Inject constructor(
+                 val filtered = applyStreamFilters(
+                     allStreams,
+                     _uiState.value.selectedAddonFilter,
+-                    _uiState.value.selectedQualityFilter
++                    _uiState.value.selectedQualityFilter,
++                    _uiState.value.selectedCacheFilter
+                 )
+                 val fullFiltered = filtered.streams
+                 streamFilterFullList = fullFiltered
+@@ -688,6 +695,8 @@ class StreamScreenViewModel @Inject constructor(
+                         filteredStreams = paginatedStreams,
+                         availableQualityTiers = filtered.qualityTiers,
+                         selectedQualityFilter = filtered.qualityFilter,
++                        availableCacheTiers = filtered.cacheTiers,
++                        selectedCacheFilter = filtered.cacheFilter,
+                         availableAddons = availableAddons,
+                         sourceChips = mergeSourceChipStatuses(
+                             existing = _uiState.value.sourceChips,
+@@ -781,7 +790,8 @@ class StreamScreenViewModel @Inject constructor(
+                                 val filtered = applyStreamFilters(
+                                     updatedAllStreams,
+                                     state.selectedAddonFilter,
+-                                    state.selectedQualityFilter
++                                    state.selectedQualityFilter,
++                                    state.selectedCacheFilter
+                                 )
+                                 val fullFiltered = filtered.streams
+                                 streamFilterFullList = fullFiltered
+@@ -793,6 +803,8 @@ class StreamScreenViewModel @Inject constructor(
+                                     allStreams = updatedAllStreams,
+                                     availableQualityTiers = filtered.qualityTiers,
+                                     selectedQualityFilter = filtered.qualityFilter,
++                                    availableCacheTiers = filtered.cacheTiers,
++                                    selectedCacheFilter = filtered.cacheFilter,
+                                     filteredStreams = if (pageEnd >= fullFiltered.size) fullFiltered
+                                         else fullFiltered.subList(0, pageEnd)
+                                 )
+@@ -1285,12 +1297,19 @@ class StreamScreenViewModel @Inject constructor(
+             if (state.selectedAddonFilter == addonName) {
+                 return@updateUiStateIfChanged state
+             }
+-            val filtered = applyStreamFilters(state.allStreams, addonName, state.selectedQualityFilter)
++            val filtered = applyStreamFilters(
++                state.allStreams,
++                addonName,
++                state.selectedQualityFilter,
++                state.selectedCacheFilter
++            )
+             val paginatedStreams = firstPage(filtered.streams)
+             state.copy(
+                 selectedAddonFilter = addonName,
+                 availableQualityTiers = filtered.qualityTiers,
+                 selectedQualityFilter = filtered.qualityFilter,
++                availableCacheTiers = filtered.cacheTiers,
++                selectedCacheFilter = filtered.cacheFilter,
+                 filteredStreams = paginatedStreams
+             )
+         }
+@@ -1302,10 +1321,39 @@ class StreamScreenViewModel @Inject constructor(
+             if (state.selectedQualityFilter == tier) {
+                 return@updateUiStateIfChanged state
+             }
+-            val filtered = applyStreamFilters(state.allStreams, state.selectedAddonFilter, tier)
++            val filtered = applyStreamFilters(
++                state.allStreams,
++                state.selectedAddonFilter,
++                tier,
++                state.selectedCacheFilter
++            )
++            state.copy(
++                availableQualityTiers = filtered.qualityTiers,
++                selectedQualityFilter = filtered.qualityFilter,
++                availableCacheTiers = filtered.cacheTiers,
++                selectedCacheFilter = filtered.cacheFilter,
++                filteredStreams = firstPage(filtered.streams)
++            )
++        }
++    }
++
++    private fun filterByCache(tier: StreamCacheTier?) {
++        streamFilterExpandJob?.cancel()
++        updateUiStateIfChanged { state ->
++            if (state.selectedCacheFilter == tier) {
++                return@updateUiStateIfChanged state
++            }
++            val filtered = applyStreamFilters(
++                state.allStreams,
++                state.selectedAddonFilter,
++                state.selectedQualityFilter,
++                tier
++            )
+             state.copy(
+                 availableQualityTiers = filtered.qualityTiers,
+                 selectedQualityFilter = filtered.qualityFilter,
++                availableCacheTiers = filtered.cacheTiers,
++                selectedCacheFilter = filtered.cacheFilter,
+                 filteredStreams = firstPage(filtered.streams)
+             )
+         }
+@@ -1317,31 +1365,51 @@ class StreamScreenViewModel @Inject constructor(
+     private class StreamFilterResult(
+         val streams: List<Stream>,
+         val qualityTiers: List<StreamQualityTier>,
+-        val qualityFilter: StreamQualityTier?
++        val qualityFilter: StreamQualityTier?,
++        val cacheTiers: List<StreamCacheTier>,
++        val cacheFilter: StreamCacheTier?
+     )
+ 
+     /**
+-     * Addon filter first, then the quality chips of what is left. A quality that is
+-     * not available for the current addon (or when only one quality exists) falls
+-     * back to "All" instead of leaving an empty list behind a hidden row.
++     * Addon filter first, then the quality and cache chips of what is left.
++     *
++     * The options of each row are computed against the other active filter, so a
++     * row never offers a choice that would empty the list. A filter that is no
++     * longer available (switched addon, only one value left) falls back to "All"
++     * instead of staying active behind a hidden row.
+      */
+     private fun applyStreamFilters(
+         allStreams: List<Stream>,
+         addonFilter: String?,
+-        qualityFilter: StreamQualityTier?
++        qualityFilter: StreamQualityTier?,
++        cacheFilter: StreamCacheTier?
+     ): StreamFilterResult {
+         val byAddon = if (addonFilter == null) {
+             allStreams
+         } else {
+             allStreams.filter { it.addonName == addonFilter }
+         }
+-        val tiers = availableQualityTiers(byAddon, ::cachedStreamQualityTier)
+-        val quality = qualityFilter?.takeIf { it in tiers }
++        val qualityForOptions = qualityFilter?.takeIf {
++            it in availableQualityTiers(byAddon, ::cachedStreamQualityTier)
++        }
++        val cacheForOptions = cacheFilter?.takeIf { it in availableCacheTiers(byAddon) }
++        val cacheTiers = availableCacheTiers(
++            filterStreamsByQuality(byAddon, qualityForOptions, ::cachedStreamQualityTier)
++        )
++        val qualityTiers = availableQualityTiers(
++            filterStreamsByCache(byAddon, cacheForOptions),
++            ::cachedStreamQualityTier
++        )
++        val quality = qualityFilter?.takeIf { it in qualityTiers }
++        val cache = cacheFilter?.takeIf { it in cacheTiers }
+         val full = groupStreamsByProvider(
+-            filterStreamsByQuality(byAddon, quality, ::cachedStreamQualityTier)
++            filterStreamsByCache(
++                filterStreamsByQuality(byAddon, quality, ::cachedStreamQualityTier),
++                cache
++            )
+         )
+         streamFilterFullList = full
+-        return StreamFilterResult(full, tiers, quality)
++        return StreamFilterResult(full, qualityTiers, quality, cacheTiers, cache)
+     }
+ 
+     private fun firstPage(full: List<Stream>): List<Stream> =
+diff --git a/app/src/main/res/values-b+es+419/strings.xml b/app/src/main/res/values-b+es+419/strings.xml
+index 669a88de0..bdaaba9cd 100644
+--- a/app/src/main/res/values-b+es+419/strings.xml
++++ b/app/src/main/res/values-b+es+419/strings.xml
+@@ -1832,6 +1832,9 @@
+     <string name="stream_player_internal">Interno</string>
+     <string name="stream_player_external">Externo</string>
+     <string name="stream_filter_all">Todos</string>
++    <string name="stream_cache_cached">En caché</string>
++    <string name="stream_cache_direct">Directo</string>
++    <string name="stream_cache_not_cached">Sin caché</string>
+     <string name="stream_episode_label">T%1$d E%2$d</string>
+     
+     <string name="player_no_external_player">No se encontró un reproductor externo</string>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index f5e1b9acf..2727c591d 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -1835,6 +1835,9 @@ Utilizas esta función bajo tu entera responsabilidad. P2P se puede desactivar e
+     <string name="stream_player_internal">Interno</string>
+     <string name="stream_player_external">Externo</string>
+     <string name="stream_filter_all">Todos</string>
++    <string name="stream_cache_cached">En caché</string>
++    <string name="stream_cache_direct">Directo</string>
++    <string name="stream_cache_not_cached">Sin caché</string>
+     <string name="stream_episode_label">S%1$d E%2$d</string>
+ 
+     <string name="player_no_external_player">No se encontró reproductor externo</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index c25ed3167..a93b6950e 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1836,6 +1836,9 @@
+     <string name="stream_player_internal">Internal</string>
+     <string name="stream_player_external">External</string>
+     <string name="stream_filter_all">All</string>
++    <string name="stream_cache_cached">Cached</string>
++    <string name="stream_cache_direct">Direct</string>
++    <string name="stream_cache_not_cached">Not cached</string>
+     <string name="stream_episode_label">S%1$d E%2$d</string>
+ 
+     <string name="player_no_external_player">No external player found</string>
+diff --git a/app/src/test/java/com/nuvio/tv/ui/screens/stream/StreamCacheFilterTest.kt b/app/src/test/java/com/nuvio/tv/ui/screens/stream/StreamCacheFilterTest.kt
+new file mode 100644
+index 000000000..b4ec9a320
+--- /dev/null
++++ b/app/src/test/java/com/nuvio/tv/ui/screens/stream/StreamCacheFilterTest.kt
+@@ -0,0 +1,214 @@
++package com.nuvio.tv.ui.screens.stream
++
++import com.nuvio.tv.domain.model.Stream
++import com.nuvio.tv.domain.model.StreamClientResolve
++import com.nuvio.tv.domain.model.StreamDebridCacheState
++import com.nuvio.tv.domain.model.StreamDebridCacheStatus
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class StreamCacheFilterTest {
++
++    private fun stream(
++        name: String,
++        url: String? = "https://example.test/$name",
++        infoHash: String? = null,
++        resolve: StreamClientResolve? = null,
++        cache: StreamDebridCacheStatus? = null,
++        description: String? = null
++    ) = Stream(
++        name = name,
++        title = name,
++        description = description,
++        url = url,
++        ytId = null,
++        infoHash = infoHash,
++        fileIdx = null,
++        externalUrl = null,
++        behaviorHints = null,
++        addonName = "Addon",
++        addonLogo = null,
++        clientResolve = resolve,
++        debridCacheStatus = cache
++    )
++
++    private fun directDebrid(name: String) = StreamClientResolve(
++        type = "debrid",
++        infoHash = "abcdef0123456789abcdef0123456789abcdef01",
++        fileIdx = 0,
++        magnetUri = null,
++        sources = null,
++        torrentName = name,
++        filename = name,
++        mediaType = "movie",
++        mediaId = "tt0000001",
++        mediaOnlyId = null,
++        title = name,
++        season = null,
++        episode = null,
++        service = "torbox",
++        serviceIndex = 0,
++        serviceExtension = null,
++        isCached = true
++    )
++
++    private fun cacheStatus(state: StreamDebridCacheState) = StreamDebridCacheStatus(
++        providerId = "torbox",
++        providerName = "Torbox",
++        state = state
++    )
++
++    private fun magnet(name: String) = stream(
++        name = name,
++        url = null,
++        infoHash = "abcdef0123456789abcdef0123456789abcdef02"
++    )
++
++    @Test
++    fun directPlaybackHasItsOwnBucket() {
++        // MoviePlus and other direct addons report no debrid cache state; the
++        // link plays as-is, so it is neither a cache hit nor a download.
++        assertEquals(StreamCacheTier.DIRECT, streamCacheTier(stream("MoviePlus 1080p")))
++    }
++
++    @Test
++    fun readsTheCacheMarkerAddonsPutInTheVisibleText() {
++        assertEquals(
++            StreamCacheTier.CACHED,
++            streamCacheTier(stream("[TB ⚡] Latinobrid\n4K"))
++        )
++        assertEquals(
++            StreamCacheTier.NOT_CACHED,
++            streamCacheTier(stream("[TB ⏳] Latinobrid\n4K"))
++        )
++
++        val selection = stream("🔥4K UHD")
++        assertEquals(
++            StreamCacheTier.CACHED,
++            streamCacheTier(selection.copy(description = "SGF · Torrentio · ⚡Ready (TB)"))
++        )
++        assertEquals(
++            StreamCacheTier.NOT_CACHED,
++            streamCacheTier(selection.copy(description = "SGF · Comet · ❌ Not Ready (TB)"))
++        )
++    }
++
++    @Test
++    fun structuredStatusBeatsTheTextMarker() {
++        assertEquals(
++            StreamCacheTier.NOT_CACHED,
++            streamCacheTier(
++                stream("⚡ label but uncached", cache = cacheStatus(StreamDebridCacheState.NOT_CACHED))
++            )
++        )
++    }
++
++    @Test
++    fun aTorrentWithoutADirectUrlMustResolveEvenIfLabeledCached() {
++        assertEquals(
++            StreamCacheTier.NOT_CACHED,
++            streamCacheTier(
++                stream(
++                    name = "[TB ⚡] Latinobrid",
++                    url = null,
++                    infoHash = "abcdef0123456789abcdef0123456789abcdef06"
++                )
++            )
++        )
++    }
++
++    @Test
++    fun cachedDebridSourcesCountAsCached() {
++        assertEquals(
++            StreamCacheTier.CACHED,
++            streamCacheTier(
++                stream(
++                    name = "Direct debrid",
++                    url = null,
++                    infoHash = "abcdef0123456789abcdef0123456789abcdef01",
++                    resolve = directDebrid("Direct debrid")
++                )
++            )
++        )
++        assertEquals(
++            StreamCacheTier.CACHED,
++            streamCacheTier(
++                stream(
++                    name = "Verified torrent",
++                    url = null,
++                    infoHash = "abcdef0123456789abcdef0123456789abcdef03",
++                    cache = cacheStatus(StreamDebridCacheState.CACHED)
++                )
++            )
++        )
++    }
++
++    @Test
++    fun torrentsWithoutACacheHitNeedDownload() {
++        assertEquals(StreamCacheTier.NOT_CACHED, streamCacheTier(magnet("Magnet")))
++        assertEquals(
++            StreamCacheTier.NOT_CACHED,
++            streamCacheTier(
++                magnet("Not cached").copy(
++                    debridCacheStatus = cacheStatus(StreamDebridCacheState.NOT_CACHED)
++                )
++            )
++        )
++
++        // Checking/unknown is not a confirmed hit yet, so it stays on the
++        // download side until the availability check answers.
++        assertEquals(
++            StreamCacheTier.NOT_CACHED,
++            streamCacheTier(
++                magnet("Checking").copy(
++                    debridCacheStatus = cacheStatus(StreamDebridCacheState.CHECKING)
++                )
++            )
++        )
++    }
++
++    @Test
++    fun listsPresentBucketsCachedFirst() {
++        val streams = listOf(
++            stream("Direct 1080p"),
++            magnet("Magnet 4K"),
++            stream(
++                name = "Verified torrent",
++                url = null,
++                infoHash = "abcdef0123456789abcdef0123456789abcdef03",
++                cache = cacheStatus(StreamDebridCacheState.CACHED)
++            )
++        )
++
++        assertEquals(
++            listOf(StreamCacheTier.CACHED, StreamCacheTier.DIRECT, StreamCacheTier.NOT_CACHED),
++            availableCacheTiers(streams)
++        )
++    }
++
++    @Test
++    fun hidesTheRowWhenEveryStreamIsInTheSameBucket() {
++        val streams = listOf(stream("Direct A"), stream("Direct B"))
++
++        assertEquals(emptyList<StreamCacheTier>(), availableCacheTiers(streams))
++        assertEquals(emptyList<StreamCacheTier>(), availableCacheTiers(emptyList()))
++    }
++
++    @Test
++    fun filtersByBucketKeepingTheAddonOrder() {
++        val direct = stream("Direct")
++        val cached = stream(
++            name = "Cached",
++            url = null,
++            infoHash = "abcdef0123456789abcdef0123456789abcdef03",
++            cache = cacheStatus(StreamDebridCacheState.CACHED)
++        )
++        val magnet = magnet("Magnet")
++        val streams = listOf(magnet, direct, cached)
++
++        assertEquals(listOf(direct), filterStreamsByCache(streams, StreamCacheTier.DIRECT))
++        assertEquals(listOf(cached), filterStreamsByCache(streams, StreamCacheTier.CACHED))
++        assertEquals(listOf(magnet), filterStreamsByCache(streams, StreamCacheTier.NOT_CACHED))
++        assertEquals(streams, filterStreamsByCache(streams, null))
++    }
++}
+-- 
+2.43.0
+

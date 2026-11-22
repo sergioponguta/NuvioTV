@@ -28,11 +28,17 @@ desde la rama por defecto.
    Sin tráiler latino no se reproduce nada. Si la petición compartida responde «el meta del
    catálogo basta» (sin tráilers), se reintenta hasta tres veces.
 
-5. **Filtro de calidad en las fuentes**: una segunda fila de chips bajo los de addons (Todos, 4K,
-   1080p, 720p, SD, Desconocido) filtra la lista por resolución, también con el addon «Todos».
-   Solo salen las resoluciones que hay para el addon elegido y la fila se oculta si hay una sola.
-   Reutiliza el parser de releases de Direct Debrid, así que vale para cualquier addon. Izquierda y
-   derecha seleccionan como en los chips de addons; arriba desde la lista cae en esta fila.
+5. **Filtros de calidad y caché en las fuentes**: dos filas compactas bajo los chips de addons.
+   La primera filtra por resolución (Todos, 4K, 1080p, 720p, SD, Desconocido). La segunda
+   filtra por forma de reproducción (Todos, En caché, Directo, Sin caché): «En caché» lee el
+   estado estructurado del debrid y los marcadores que los addons escriben en el texto
+   (`[TB ⚡]`/`[TB ⏳]`, `⚡Ready`/`❌ Not Ready`); «Directo» es reproducción directa sin caché
+   (MoviePlus, LAT-ADD…); «Sin caché» es lo que necesita descarga o resolve. Solo salen las
+   opciones presentes y cada fila se oculta si queda una sola; si una opción desaparece al
+   cambiar de filtro, vuelve a «Todos». Izquierda/derecha seleccionan; abajo desde los addons
+   pasa por calidad y luego caché, y arriba desde la lista cae en la fila visible más cercana.
+   Los chips de estas filas miden 24 dp y la fila 32 dp (el `FilterChip` de TV mide 32 dp y la
+   fila anterior 56 dp). Reutiliza el parser de releases de Direct Debrid para la resolución.
 
 ## Esquema de versiones (importante para el actualizador)
 
