@@ -1,7 +1,7 @@
-From ac2c720032c891b1577500eed711587441374a31 Mon Sep 17 00:00:00 2001
+From 57e1a0cb5a5139330f92075af0cf3ae3d6167c71 Mon Sep 17 00:00:00 2001
 From: Sergio Ponguta <sergioponguta@gmail.com>
 Date: Tue, 17 Nov 2026 11:23:46 -0500
-Subject: [PATCH 2/2] fix(kovalla): folder poster trailers fall back to the
+Subject: [PATCH 2/5] fix(kovalla): folder poster trailers fall back to the
  meta addons
 
 - Collection folders build items from TMDB with `tmdb:<id>`; the trailer pipeline only
@@ -16,7 +16,7 @@ Subject: [PATCH 2/2] fix(kovalla): folder poster trailers fall back to the
  1 file changed, 63 insertions(+), 3 deletions(-)
 
 diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt b/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt
-index 2597da1..819943f 100644
+index 2597da112..819943fde 100644
 --- a/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt
 +++ b/app/src/main/java/com/nuvio/tv/ui/screens/collection/FolderDetailViewModel.kt
 @@ -45,6 +45,7 @@ import com.nuvio.tv.domain.repository.CatalogRepository

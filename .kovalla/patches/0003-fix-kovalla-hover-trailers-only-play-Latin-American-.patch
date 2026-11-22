@@ -1,8 +1,8 @@
-From 379213863091537bf6b6c1aedc2efa00da97c0b3 Mon Sep 17 00:00:00 2001
+From 0ac9bc1785645708085bc3e1f6be312eba72f29a Mon Sep 17 00:00:00 2001
 From: Sergio Ponguta <sergioponguta@gmail.com>
 Date: Tue, 17 Nov 2026 14:59:06 -0500
-Subject: [PATCH] fix(kovalla): hover trailers only play Latin American Spanish
- ones
+Subject: [PATCH 3/5] fix(kovalla): hover trailers only play Latin American
+ Spanish ones
 
 - Home and folder hover took the first trailer of any language: the English one from the
   catalog or TMDB, or the Spain dub the stock metadata addons carry as lang es / es-ES.
@@ -207,6 +207,3 @@ index f5fbecc0f..0101e301d 100644
                          trailerService.getTrailerPlaybackSourceFromYouTubeUrl(
                              youtubeUrl = "https://www.youtube.com/watch?v=$ytId",
                              title = title,
--- 
-2.43.0
-

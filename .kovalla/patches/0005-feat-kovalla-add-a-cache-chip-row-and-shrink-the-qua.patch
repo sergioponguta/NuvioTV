@@ -1,8 +1,8 @@
-From 3999ee3b097df375555a404c9c29cf076c688af7 Mon Sep 17 00:00:00 2001
+From c5f783ee8b078858147b16513fae0cf488cd6bb9 Mon Sep 17 00:00:00 2001
 From: Sergio Ponguta <sergioponguta@gmail.com>
 Date: Sun, 22 Nov 2026 13:06:56 -0500
-Subject: [PATCH] feat(kovalla): add a cache chip row and shrink the quality
- chips
+Subject: [PATCH 5/5] feat(kovalla): add a cache chip row and shrink the
+ quality chips
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -880,6 +880,3 @@ index 000000000..b4ec9a320
 +        assertEquals(streams, filterStreamsByCache(streams, null))
 +    }
 +}
--- 
-2.43.0
-

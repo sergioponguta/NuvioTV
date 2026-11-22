@@ -1,7 +1,7 @@
-From 3341bf54ba5514ed553a47e86ac8318861f315e9 Mon Sep 17 00:00:00 2001
+From 8362d7673d24f14c6350c11606e965f60944f151 Mon Sep 17 00:00:00 2001
 From: Sergio Ponguta <sergioponguta@gmail.com>
 Date: Tue, 17 Nov 2026 19:46:30 -0500
-Subject: [PATCH] feat(kovalla): filter streams with a quality chip row
+Subject: [PATCH 4/5] feat(kovalla): filter streams with a quality chip row
 
 A second row under the addon chips (All, 4K, 1080p, 720p, SD, Unknown) filters the
 source list by resolution, also when the addon chip is All. Only the tiers present for
@@ -551,6 +551,3 @@ index 000000000..513ad0ba4
 +        assertEquals(streams, filterStreamsByQuality(streams, null, ::streamQualityTier))
 +    }
 +}
--- 
-2.43.0
-
